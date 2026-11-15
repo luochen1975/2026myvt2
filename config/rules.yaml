@@ -1965,7 +1965,7 @@ settings:
   keep_multicast: 5
   proxy: "http://127.0.0.1:7890"                      # 需要代理时填写，例如 "http://127.0.0.1:7890"，不需要就留空
   timeout: 8
-  concurrency: 8                      # GitHub Actions 那边再改成 skip_speed_test=true、concurrency 拉回 40，软路由 8
+  concurrency: 6                     # GitHub Actions 那边再改成 skip_speed_test=true、concurrency 拉回 40，软路由 6-8
   min_speed_kbps: 30
   enable_ffprobe: true
   ffprobe_timeout: 12
