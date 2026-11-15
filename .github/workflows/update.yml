@@ -2,10 +2,10 @@ name: Update IPTV
 
 permissions:
   contents: write
-  
+
 on:
   schedule:
-    - cron: '18 20,8 * * *'   # UTC，对应北京时间 10:00 和 22:00
+    - cron: '0 2,14 * * *'   # UTC 02:00 和 14:00，对应北京时间 10:00 和 22:00
   workflow_dispatch:
 
 jobs:
@@ -31,10 +31,6 @@ jobs:
 
       - name: Run update
         run: python scripts/update_iptv.py
-        # 需要代理时取消注释，并在仓库 Secrets 添加 PROXY_URL
-        # env:
-        #   HTTP_PROXY: ${{ secrets.PROXY_URL }}
-        #   HTTPS_PROXY: ${{ secrets.PROXY_URL }}
 
       - name: Commit results
         run: |
