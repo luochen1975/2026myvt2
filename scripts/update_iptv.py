@@ -12,19 +12,24 @@ from collections import defaultdict
 
 # 不测速直接保留的前缀
 SPECIAL_KEEP_PREFIXES = [
-    "http://[2409:8087:2801:20:100::",
+    "http://[2409:8087:",
     "http://hwltc.tv.cdn.zj.chinamobile.com",
+    "https://hwltc.tv.cdn.zj.chinamobile.com",
+    "rtp://",
+    "udp://",
 ]
 
 def is_special_keep(url: str) -> bool:
-    return any(url.startswith(prefix) for prefix in SPECIAL_KEEP_PREFIXES)
+    url_lower = url.lower()
+    return any(url_lower.startswith(prefix.lower()) for prefix in SPECIAL_KEEP_PREFIXES)
 
 def is_multicast(url: str) -> bool:
-    """简单判断是否为组播源"""
     url_lower = url.lower()
     if url_lower.startswith(("rtp://", "udp://")):
         return True
-    if "2409:8087" in url or "[2409:" in url:
+    if "2409:8087" in url_lower or "[2409:" in url_lower:
+        return True
+    if "hwltc.tv.cdn.zj.chinamobile.com" in url_lower:
         return True
     return False
 
@@ -77,7 +82,7 @@ def parse_content(content: str):
                     channels.append({"name": name, "url": url, "origin_group": group})
         elif "," in line and not line.startswith("#"):
             parts = line.split(",", 1)
-            if len(parts) == 2 and parts[1].strip().startswith("http"):
+            if len(parts) == 2 and parts[1].strip().startswith(("http", "rtp", "udp")):
                 channels.append({
                     "name": parts[0].strip(),
                     "url": parts[1].strip(),
@@ -88,12 +93,10 @@ def parse_content(content: str):
 
 
 def filter_by_keywords(channels, keywords):
-    """白名单改为可选：不再删除任何频道"""
     return channels
 
 
 def filter_by_blacklist(channels, blacklist):
-    """黑名单硬删除"""
     if not blacklist:
         return channels
     result = []
@@ -156,7 +159,7 @@ async def light_check(session, url, timeout, ua):
         return None
 
 
-def ffprobe_check(url, timeout=12):
+def ffprobe_check(url, timeout=12, proxy=None):
     if not shutil.which("ffprobe"):
         return {
             "ok": True, "has_video": True, "has_audio": True,
@@ -170,8 +173,13 @@ def ffprobe_check(url, timeout=12):
         "-of", "csv=p=0",
         "-timeout", str(timeout * 1000000),
         "-user_agent", "Mozilla/5.0",
-        url
     ]
+    # ffprobe 代理支持（如果设置了 proxy）
+    if proxy:
+        cmd.extend(["-http_proxy", proxy])
+
+    cmd.append(url)
+
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 2)
         if result.returncode != 0:
@@ -220,6 +228,12 @@ def ffprobe_check(url, timeout=12):
 
 
 async def two_stage_test(channels, settings):
+    # ========== 跳过测速模式（GitHub Actions） ==========
+    if settings.get("skip_speed_test", False):
+        print("已开启 skip_speed_test，跳过所有测速，直接保留全部源")
+        return channels
+
+    # ========== 正常测速模式（软路由 / 本地） ==========
     timeout = settings.get("timeout", 8)
     concurrency = settings.get("concurrency", 40)
     ua = settings.get("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
@@ -227,13 +241,18 @@ async def two_stage_test(channels, settings):
     enable_ffprobe = settings.get("enable_ffprobe", True)
     ffprobe_timeout = settings.get("ffprobe_timeout", 12)
     audio_only_group = settings.get("audio_only_group", "").strip()
+    proxy = settings.get("proxy", "").strip() or None
+
+    if proxy:
+        print(f"使用代理: {proxy}")
+    else:
+        print("未配置代理，直连测速")
 
     print(f"初筛并发: {concurrency}, 超时: {timeout}s")
     sem = asyncio.Semaphore(concurrency)
     light_passed = []
 
     async def light_worker(ch):
-        # 特殊源直接保留，不测速
         if is_special_keep(ch["url"]):
             ch.update({
                 "latency_ms": 0,
@@ -250,8 +269,19 @@ async def two_stage_test(channels, settings):
                 ch.update(res)
                 light_passed.append(ch)
 
+    # 创建带代理的 connector 和 session
     connector = aiohttp.TCPConnector(limit=concurrency, ssl=False, ttl_dns_cache=300)
-    async with aiohttp.ClientSession(connector=connector) as session:
+    timeout_obj = aiohttp.ClientTimeout(total=timeout)
+
+    async with aiohttp.ClientSession(
+        connector=connector,
+        timeout=timeout_obj,
+        trust_env=True  # 也支持系统环境变量代理
+    ) as session:
+        # 如果配置了 proxy，给 session 默认使用
+        if proxy:
+            session._default_proxy = proxy   # 简单处理
+
         await asyncio.gather(*(light_worker(ch) for ch in channels))
 
     print(f"初筛通过（含特殊直留）: {len(light_passed)} / {len(channels)}")
@@ -264,17 +294,17 @@ async def two_stage_test(channels, settings):
     deep_sem = asyncio.Semaphore(min(15, max(5, concurrency // 3)))
 
     async def deep_worker(ch):
-        # 特殊源跳过 ffprobe
         if ch.get("special_keep"):
             deep_passed.append(ch)
             return
 
         async with deep_sem:
             loop = asyncio.get_running_loop()
-            res = await loop.run_in_executor(None, ffprobe_check, ch["url"], ffprobe_timeout)
+            res = await loop.run_in_executor(
+                None, ffprobe_check, ch["url"], ffprobe_timeout, proxy
+            )
             if res and res.get("ok"):
                 ch.update(res)
-                # 纯音频归到广播
                 if not res.get("has_video") and res.get("has_audio") and audio_only_group:
                     ch["group"] = audio_only_group
                 deep_passed.append(ch)
@@ -300,7 +330,6 @@ def dedup_and_select(channels, keep_unicast=8, keep_multicast=5):
             else:
                 unicast.append(ch)
 
-        # 速度优先排序（特殊源速度为 99999，会排最前）
         unicast.sort(key=lambda x: (-x.get("speed_kbps", 0), x.get("latency_ms", 9999)))
         multicast.sort(key=lambda x: (-x.get("speed_kbps", 0), x.get("latency_ms", 9999)))
 
@@ -338,18 +367,28 @@ async def main():
     keywords = load_list(KEYWORDS_FILE)
     blacklist = load_list(BLACKLIST_FILE)
 
-    print(f"白名单关键字: {len(keywords)} 个（仅可选，不删除）")
+    skip_test = settings.get("skip_speed_test", False)
+    keep_unicast = settings.get("keep_unicast", 8)
+    keep_multicast = settings.get("keep_multicast", 5)
+    proxy = settings.get("proxy", "").strip()
+
+    print(f"跳过测速: {skip_test}")
+    print(f"非组播保留: {keep_unicast} 个，组播保留: {keep_multicast} 个")
+    print(f"代理: {proxy if proxy else '无'}")
+    print(f"白名单关键字: {len(keywords)} 个（不删除）")
     print(f"黑名单: {len(blacklist)} 个")
 
     print("\n=== 拉取源 ===")
     urls = load_list(SOURCES_FILE)
     all_channels = []
 
+    # 拉取源时也支持代理
+    proxy_for_fetch = proxy if proxy else None
     async with aiohttp.ClientSession() as session:
         for url in urls:
             print(f"拉取: {url}")
             try:
-                async with session.get(url, timeout=30) as resp:
+                async with session.get(url, timeout=30, proxy=proxy_for_fetch) as resp:
                     content = await resp.text(encoding="utf-8", errors="ignore")
                     chs = parse_content(content)
                     print(f"  → {len(chs)} 个")
@@ -359,10 +398,6 @@ async def main():
 
     print(f"原始总计: {len(all_channels)}")
 
-    print("\n=== 白名单处理（已改为不删除） ===")
-    all_channels = filter_by_keywords(all_channels, keywords)
-    print(f"白名单后: {len(all_channels)}")
-
     print("\n=== 黑名单剔除 ===")
     all_channels = filter_by_blacklist(all_channels, blacklist)
     print(f"黑名单后: {len(all_channels)}")
@@ -370,17 +405,29 @@ async def main():
     print("\n=== 应用重命名/分组 ===")
     all_channels = apply_rules(all_channels, rules)
 
-    print("\n=== 两阶段测速 ===")
+    print("\n=== 测速阶段 ===")
     tested = await two_stage_test(all_channels, settings)
 
-    print("\n=== 去重优选（非组播最多8个，组播最多5个） ===")
-    final = dedup_and_select(tested, keep_unicast=8, keep_multicast=5)
+    print(f"\n=== 去重优选（非组播≤{keep_unicast}，组播≤{keep_multicast}） ===")
+    final = dedup_and_select(tested, keep_unicast=keep_unicast, keep_multicast=keep_multicast)
     print(f"最终保留: {len(final)}")
 
+    # ========== 根据模式输出不同文件名 ==========
     OUTPUT_DIR.mkdir(exist_ok=True)
-    (OUTPUT_DIR / "iptv.m3u").write_text(generate_m3u(final), encoding="utf-8")
-    (OUTPUT_DIR / "iptv.txt").write_text(generate_txt(final), encoding="utf-8")
-    print("\n已生成 output/iptv.m3u 和 output/iptv.txt")
+
+    if skip_test:
+        m3u_path = OUTPUT_DIR / "iptv.m3u"
+        txt_path = OUTPUT_DIR / "iptv.txt"
+        print("\n模式：不测速（GitHub Actions）")
+    else:
+        m3u_path = OUTPUT_DIR / "移动iptv.m3u"
+        txt_path = OUTPUT_DIR / "移动iptv.txt"
+        print("\n模式：已测速（软路由/本地）")
+
+    m3u_path.write_text(generate_m3u(final), encoding="utf-8")
+    txt_path.write_text(generate_txt(final), encoding="utf-8")
+    print(f"已生成: {m3u_path}")
+    print(f"已生成: {txt_path}")
 
 
 if __name__ == "__main__":
