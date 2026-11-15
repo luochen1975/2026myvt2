@@ -2,21 +2,24 @@ name: Update IPTV
 
 on:
   schedule:
-    - cron: '18 20,12 * * *'   # 每天北京时间 10:00 和 22:00（UTC+8）
-  workflow_dispatch:         # 支持手动触发
+    - cron: '18 20,8 * * *'   # UTC，对应北京时间 10:00 和 22:00
+  workflow_dispatch:
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
       - name: Install dependencies
         run: |
@@ -25,14 +28,17 @@ jobs:
 
       - name: Run update
         run: python scripts/update_iptv.py
-        env:
-          # 如需代理，取消注释并在 Secrets 里加 PROXY_URL
-          # HTTP_PROXY: ${{ secrets.PROXY_URL }}
-          # HTTPS_PROXY: ${{ secrets.PROXY_URL }}
+        # 需要代理时取消注释，并在仓库 Secrets 添加 PROXY_URL
+        # env:
+        #   HTTP_PROXY: ${{ secrets.PROXY_URL }}
+        #   HTTPS_PROXY: ${{ secrets.PROXY_URL }}
 
-      - name: Commit and push
+      - name: Commit results
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add output/
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: update iptv $(date -u +%Y-%m-%dT%H:%M:%SZ)" && git push)
+          git diff --quiet && git diff --staged --quiet || (
+            git commit -m "chore: update iptv $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git push
+          )
