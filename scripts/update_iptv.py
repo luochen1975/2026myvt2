@@ -10,6 +10,25 @@ import shutil
 from pathlib import Path
 from collections import defaultdict
 
+# 不测速直接保留的前缀
+SPECIAL_KEEP_PREFIXES = [
+    "http://[2409:8087:2801:20:100::",
+    "http://hwltc.tv.cdn.zj.chinamobile.com",
+]
+
+def is_special_keep(url: str) -> bool:
+    return any(url.startswith(prefix) for prefix in SPECIAL_KEEP_PREFIXES)
+
+def is_multicast(url: str) -> bool:
+    """简单判断是否为组播源"""
+    url_lower = url.lower()
+    if url_lower.startswith(("rtp://", "udp://")):
+        return True
+    if "2409:8087" in url or "[2409:" in url:
+        return True
+    return False
+
+
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = ROOT / "config"
 OUTPUT_DIR = ROOT / "output"
@@ -69,12 +88,12 @@ def parse_content(content: str):
 
 
 def filter_by_keywords(channels, keywords):
-    if not keywords:
-        return channels
-    return [ch for ch in channels if any(kw.lower() in ch["name"].lower() for kw in keywords)]
+    """白名单改为可选：不再删除任何频道"""
+    return channels
 
 
 def filter_by_blacklist(channels, blacklist):
+    """黑名单硬删除"""
     if not blacklist:
         return channels
     result = []
@@ -214,6 +233,17 @@ async def two_stage_test(channels, settings):
     light_passed = []
 
     async def light_worker(ch):
+        # 特殊源直接保留，不测速
+        if is_special_keep(ch["url"]):
+            ch.update({
+                "latency_ms": 0,
+                "speed_kbps": 99999,
+                "ok": True,
+                "special_keep": True
+            })
+            light_passed.append(ch)
+            return
+
         async with sem:
             res = await light_check(session, ch["url"], timeout, ua)
             if res and res["ok"] and res["speed_kbps"] >= min_speed:
@@ -224,7 +254,7 @@ async def two_stage_test(channels, settings):
     async with aiohttp.ClientSession(connector=connector) as session:
         await asyncio.gather(*(light_worker(ch) for ch in channels))
 
-    print(f"初筛通过: {len(light_passed)} / {len(channels)}")
+    print(f"初筛通过（含特殊直留）: {len(light_passed)} / {len(channels)}")
 
     if not enable_ffprobe or not light_passed:
         return light_passed
@@ -234,12 +264,17 @@ async def two_stage_test(channels, settings):
     deep_sem = asyncio.Semaphore(min(15, max(5, concurrency // 3)))
 
     async def deep_worker(ch):
+        # 特殊源跳过 ffprobe
+        if ch.get("special_keep"):
+            deep_passed.append(ch)
+            return
+
         async with deep_sem:
             loop = asyncio.get_running_loop()
             res = await loop.run_in_executor(None, ffprobe_check, ch["url"], ffprobe_timeout)
             if res and res.get("ok"):
                 ch.update(res)
-                # 纯音频 → 自动归到广播
+                # 纯音频归到广播
                 if not res.get("has_video") and res.get("has_audio") and audio_only_group:
                     ch["group"] = audio_only_group
                 deep_passed.append(ch)
@@ -249,7 +284,7 @@ async def two_stage_test(channels, settings):
     return deep_passed
 
 
-def dedup_and_select(channels, keep=3):
+def dedup_and_select(channels, keep_unicast=8, keep_multicast=5):
     groups = defaultdict(list)
     for ch in channels:
         key = re.sub(r'[\s\-_]+', '', ch["name"]).lower()
@@ -257,12 +292,21 @@ def dedup_and_select(channels, keep=3):
 
     final = []
     for items in groups.values():
-        items.sort(key=lambda x: (
-            -x.get("height", 0),
-            -x.get("speed_kbps", 0),
-            x.get("latency_ms", 9999)
-        ))
-        final.extend(items[:keep])
+        unicast = []
+        multicast = []
+        for ch in items:
+            if is_multicast(ch["url"]) or ch.get("special_keep"):
+                multicast.append(ch)
+            else:
+                unicast.append(ch)
+
+        # 速度优先排序（特殊源速度为 99999，会排最前）
+        unicast.sort(key=lambda x: (-x.get("speed_kbps", 0), x.get("latency_ms", 9999)))
+        multicast.sort(key=lambda x: (-x.get("speed_kbps", 0), x.get("latency_ms", 9999)))
+
+        final.extend(unicast[:keep_unicast])
+        final.extend(multicast[:keep_multicast])
+
     return final
 
 
@@ -293,9 +337,8 @@ async def main():
     rules, settings = load_rules()
     keywords = load_list(KEYWORDS_FILE)
     blacklist = load_list(BLACKLIST_FILE)
-    keep = settings.get("keep_per_channel", 3)
 
-    print(f"白名单关键字: {len(keywords)} 个")
+    print(f"白名单关键字: {len(keywords)} 个（仅可选，不删除）")
     print(f"黑名单: {len(blacklist)} 个")
 
     print("\n=== 拉取源 ===")
@@ -316,7 +359,7 @@ async def main():
 
     print(f"原始总计: {len(all_channels)}")
 
-    print("\n=== 白名单筛选 ===")
+    print("\n=== 白名单处理（已改为不删除） ===")
     all_channels = filter_by_keywords(all_channels, keywords)
     print(f"白名单后: {len(all_channels)}")
 
@@ -330,8 +373,8 @@ async def main():
     print("\n=== 两阶段测速 ===")
     tested = await two_stage_test(all_channels, settings)
 
-    print("\n=== 去重优选 ===")
-    final = dedup_and_select(tested, keep=keep)
+    print("\n=== 去重优选（非组播最多8个，组播最多5个） ===")
+    final = dedup_and_select(tested, keep_unicast=8, keep_multicast=5)
     print(f"最终保留: {len(final)}")
 
     OUTPUT_DIR.mkdir(exist_ok=True)
