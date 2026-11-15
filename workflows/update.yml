@@ -1,5 +1,8 @@
 name: Update IPTV
 
+permissions:
+  contents: write
+  
 on:
   schedule:
     - cron: '18 20,8 * * *'   # UTC，对应北京时间 10:00 和 22:00
