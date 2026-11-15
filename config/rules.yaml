@@ -1963,11 +1963,11 @@ settings:
   skip_speed_test: true          # Actions 用 true，软路由/本地改 false
   keep_unicast: 8
   keep_multicast: 5
-  proxy: "http://127.0.0.1:7890"                      # 需要代理时填写，例如 "http://127.0.0.1:7890"，不需要就留空
+  proxy: ""                      # 需要代理时填写，例如 "http://127.0.0.1:7890"，不需要就留空
   timeout: 8
-  concurrency: 6                     # GitHub Actions 那边再改成 skip_speed_test=true、concurrency 拉回 40，软路由 6-8
+  concurrency: 40                     # GitHub Actions 那边再改成 skip_speed_test=true、concurrency 拉回 40，软路由 6-8
   min_speed_kbps: 30
-  enable_ffprobe: true
+  enable_ffprobe: false
   ffprobe_timeout: 12
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 audio_only_group: "广播"
