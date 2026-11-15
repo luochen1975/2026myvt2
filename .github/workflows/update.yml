@@ -5,7 +5,7 @@ permissions:
 
 on:
   schedule:
-    - cron: '0 2,14 * * *'   # UTC 02:00 和 14:00，对应北京时间 10:00 和 22:00
+    - cron: '18 20,8 * * *'   # UTC 02:00 和 14:00，对应北京时间 10:00 和 22:00
   workflow_dispatch:
 
 jobs:
