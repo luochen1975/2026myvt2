@@ -1960,14 +1960,15 @@ rules:
     group: '四川地方'
   
 settings:
-  keep_per_channel: 3
+  skip_speed_test: true          # Actions 用 true，软路由/本地改 false
+  keep_unicast: 8
+  keep_multicast: 5
+  proxy: "http://127.0.0.1:7890"                      # 需要代理时填写，例如 "http://127.0.0.1:7890"，不需要就留空
   timeout: 8
   concurrency: 40
   min_speed_kbps: 30
   enable_ffprobe: true
   ffprobe_timeout: 12
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-  
-  # ↓↓↓ 在这里加开关 ↓↓↓
-  audio_only_group: "广播"   # 纯音频源强制归到这个分组，留空或不写则不强制修改
+audio_only_group: "广播"
 
