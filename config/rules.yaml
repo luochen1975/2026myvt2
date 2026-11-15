@@ -1957,3 +1957,15 @@
 - filter: '(?i)^(?:眉山新闻|眉山综合)$'
   rename: '眉山新闻综合'
   group: '四川地方'
+
+settings:
+  keep_per_channel: 3
+  timeout: 8
+  concurrency: 40
+  min_speed_kbps: 30
+  enable_ffprobe: true
+  ffprobe_timeout: 12
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+  # ↓↓↓ 在这里加开关 ↓↓↓
+  audio_only_group: "广播"   # 纯音频源强制归到这个分组，留空或不写则不强制修改
