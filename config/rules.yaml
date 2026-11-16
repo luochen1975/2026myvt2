@@ -1964,9 +1964,9 @@ settings:
   keep_unicast: 8
   keep_multicast: 5
   proxy: ""                      # 需要代理时填写，例如 "http://127.0.0.1:7890"，不需要就留空
-  timeout: 8
+  timeout: 12
   concurrency: 40                     # GitHub Actions 那边再改成 skip_speed_test=true、concurrency 拉回 40，软路由 6-8
-  min_speed_kbps: 30
+  min_speed_kbps: 100
   enable_ffprobe: false
   ffprobe_timeout: 12
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
