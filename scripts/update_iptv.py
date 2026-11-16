@@ -19,9 +19,19 @@ SPECIAL_KEEP_PREFIXES = [
     "udp://",
 ]
 
+# 新增：包含匹配关键词，URL里面包含就不测速（不算组播）
+SKIP_SPEED_KEYWORDS = [
+    "iptv.4666888.xyz"
+]
+
 def is_special_keep(url: str) -> bool:
     url_lower = url.lower()
     return any(url_lower.startswith(prefix.lower()) for prefix in SPECIAL_KEEP_PREFIXES)
+
+# 新增：关键词包含匹配函数
+def is_skip_keyword(url: str) -> bool:
+    url_lower = url.lower()
+    return any(kw in url_lower for kw in SKIP_SPEED_KEYWORDS)
 
 def is_multicast(url: str) -> bool:
     url_lower = url.lower()
@@ -253,7 +263,8 @@ async def two_stage_test(channels, settings):
     light_passed = []
 
     async def light_worker(ch):
-        if is_special_keep(ch["url"]):
+        # 这里同时判断原有前缀 + 新增关键词
+        if is_special_keep(ch["url"]) or is_skip_keyword(ch["url"]):
             ch.update({
                 "latency_ms": 0,
                 "speed_kbps": 99999,
