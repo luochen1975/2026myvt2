@@ -21,22 +21,22 @@ SPECIAL_KEEP_PREFIXES = [
 
 # 新增：包含匹配关键词，URL里面包含就不测速（不算组播）
 SKIP_SPEED_KEYWORDS = [
-    "iptv.4666888.xyz"，
-    "211.72.174"，
-    "cdn6.cc.cd"，
-    "cdn3.indevs.in"，
-    "8.fast.hidns.vip"，
-    "my5353.com"，
-    "111.0.115."，
-    "lotus.stingray.com"，
-    "cdn.qd.je"，
-    "38.64.72"，
-    "d2jc41c1shgcol.cloudfront.net"，
-    "b27a6dd8a86c3e4ba93fbae22aaaac64"，
-    "the-pet-collective-international"，
-    "81d1c38525014f39a1705b01e04d91c2"，
-    "ntd02.akamaized.net"，
-    "f13h.mine.nu"，
+    "iptv.4666888.xyz",
+    "211.72.174",
+    "cdn6.cc.cd",
+    "cdn3.indevs.in",
+    "8.fast.hidns.vip",
+    "my5353.com",
+    "111.0.115.",
+    "lotus.stingray.com",
+    "cdn.qd.je",
+    "38.64.72",
+    "d2jc41c1shgcol.cloudfront.net",
+    "b27a6dd8a86c3e4ba93fbae22aaaac64",
+    "the-pet-collective-international",
+    "81d1c38525014f39a1705b01e04d91c2",
+    "ntd02.akamaized.net",
+    "f13h.mine.nu",
     "live.wcetv.com"
 ]
 
