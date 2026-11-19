@@ -9,16 +9,16 @@ rules:
   # ==============================================
   # 央视全系列 CCTV1~17 + CCTV5+ + CGTN多语种
   # ==============================================
-  - filter: '(?i).*(广播|电台|radio|FM|之音|之声|伴音|调频|CRI).*'
+  - filter: '(?i)^(?!.*(?:CCTV|央视|中央电视台)).*(广播|电台|radio|FM|之音|之声|伴音|调频|CRI).*'
     rename: ''
     group: '广播'
-  - filter: '(?i).*(合集|精选|DJ|歌曲|串烧|合集|Beyond|电音|狂热|车载).*'
+  - filter: '(?i)^(?!.*(?:CCTV|央视|中央电视台)).*(合集|精选|DJ|歌曲|串烧|合集|Beyond|电音|狂热|车载).*'
     rename: ''
     group: '音乐'
-  - filter: '(?i).*(NewTV|UTV|天府|咪视界|IPTV|iHOT|黑莓|睛彩|咪咕|Love).*'
+  - filter: '(?i)^(?!.*(?:CCTV|央视|中央电视台)).*(NewTV|UTV|天府|咪视界|IPTV|iHOT|黑莓|睛彩|咪咕|Love).*'
     rename: ''
     group: 'NewTviHOT等'
-  - filter: '(?i).*(影院|电影|CHC|家庭|华数|剧场|淘|BesTV|轮播|求索).*'
+  - filter: '(?i)^(?!.*(?:CCTV|央视|中央电视台)).*(影院|电影|CHC|家庭|华数|剧场|淘|BesTV|轮播|求索).*'
     rename: ''
     group: '精彩'
   - filter: '(?i).*(?:CCTV|中央电视台|央视)[\s_-]*0?1(?!\d)(?:[\s_-]*(?:台|套|综合|综合频道))?.*'
@@ -1983,6 +1983,15 @@ rules:
 
 
     
+  # ===== 补丁新增：CCTV 兜底（放最后，前面精确规则优先） =====
+  - filter: '(?i).*(?:CCTV|中央电视台|央视).*'
+    rename: ''
+    group: '央视'
+  # ===== 补丁新增：卫视兜底 =====
+  - filter: '(?i).*(卫视).*'
+    rename: ''
+    group: '卫视'
+
 settings:
   # 可选：强制指定模式（一般不用写，让程序自动判断）
   # force_mode: "smart"     # skip / direct / smart
@@ -1994,4 +2003,3 @@ settings:
   min_speed_kbps: 100
 
   # 其他参数可以不写，程序会根据环境自动给合理值
-
