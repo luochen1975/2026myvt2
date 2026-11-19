@@ -1984,15 +1984,14 @@ rules:
 
     
 settings:
-  skip_speed_test: true          # Actions 用 true，软路由/本地改 false
-  keep_unicast: 8
-  keep_multicast: 5
-  proxy: ""                      # 需要代理时填写，例如 "http://127.0.0.1:7890"，不需要就留空
-  timeout: 12
-  concurrency: 40                     # GitHub Actions 那边再改成 skip_speed_test=true、concurrency 拉回 40，软路由 6-8
+  # 可选：强制指定模式（一般不用写，让程序自动判断）
+  # force_mode: "smart"     # skip / direct / smart
+
+  # 代理（路由器或电脑有代理就填，没有就留空或删除这行）
+  proxy: "http://127.0.0.1:7890"
+
+  # 最低速度阈值
   min_speed_kbps: 100
-  enable_ffprobe: false
-  ffprobe_timeout: 12
-  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-audio_only_group: "广播"
+
+  # 其他参数可以不写，程序会根据环境自动给合理值
 
