@@ -1,16 +1,57 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""IPTV 源拉取 / 测速 / 去重（基于你原来的 update_iptv.py 修正）
+
+本次改动（每条都对应你日志里的现象）：
+1) 拉取订阅改成【写死直连】——原来 proxy_for_fetch = conf.get("proxy")，
+   代理一配就把订阅请求送进代理，407 就是这么来的。现在 proxy 只用于测速补测。
+2) 测速完整实现你的设计：直连 → ≥阈值通过；<阈值 → 代理补测；都 <阈值 → 判不通。
+   并且把 via_proxy / direct_kbps 真正输出出来（原来只在内存里，产物里看不见）。
+3) 新增 --check-proxy：一条命令判断代理是否需要账号密码（407 / 200 / 未监听）。
+4) .m3u8 不再按普通文件读 16KB 算速度（播放列表几 KB 秒下 → 假通过），改成分片实测。
+5) 最终 0 条时拒绝覆盖旧文件；写出改为临时文件 + 原子替换。
+6) txt 里名称/分组含逗号会拆行，写入前统一替换。
+7) 速度采样改成"读满 64KB 或读够 1 秒"窗口（原来固定 16KB，快链路假高、慢链路假低）；
+   直连网络类失败重试一次，避免一次手抖误杀好源。
+8) 去重键归一：CCTV-1 / CCTV1 高清 / CCTV-1 HD 视为同一频道；排序按
+   分组优先级（央视→卫视→港澳台…）+ CCTV 数字序（CCTV-2 在 CCTV-10 前）。
+9) rules.yaml 的 replace 字段恢复支持（字符串=正则替换，两元素列表=纯文本替换）。
+10) 新增 --limit / --group 抽样参数：只写 *_抽样 文件，绝不覆盖正式列表。
+
+用法：
+  python3 scripts/update_iptv.py                    # 正常跑
+  python3 scripts/update_iptv.py --check-proxy      # 只体检代理，不跑全流程
+  python3 scripts/update_iptv.py --limit 30         # 随机抽 30 条跑通流程（输出 xxx_抽样.*）
+  python3 scripts/update_iptv.py --group 卫视        # 只测某个分组（rules.yaml 里的 group）
+"""
+
 import asyncio
-import aiohttp
-import re
-import yaml
-import time
-import subprocess
-import shutil
 import os
 import platform
-from pathlib import Path
+import random
+import re
+import shutil
+import subprocess
+import sys
+import time
+import traceback
 from collections import defaultdict
+from pathlib import Path
+from urllib.parse import urljoin
+
+def _die(msg, code=1):
+    print("\n[FATAL] " + msg, file=sys.stderr)
+    sys.exit(code)
+
+try:
+    import aiohttp
+except Exception as e:
+    _die("无法 import aiohttp（%s）。\n路由上执行：opkg update && opkg install python3-aiohttp" % e)
+try:
+    import yaml
+except Exception as e:
+    _die("无法 import yaml（%s）。\n路由上执行：opkg install python3-yaml" % e)
+
 
 # ====================== 不测速直接保留的规则 ======================
 SPECIAL_KEEP_PREFIXES = [
@@ -20,7 +61,6 @@ SPECIAL_KEEP_PREFIXES = [
     "rtp://",
     "udp://",
 ]
-
 SKIP_SPEED_KEYWORDS = [
     "iptv.4666888.xyz",
     "211.72.174",
@@ -41,15 +81,27 @@ SKIP_SPEED_KEYWORDS = [
     "live.wcetv.com",
 ]
 
-def is_special_keep(url: str) -> bool:
+STATS = {
+    "done": 0,
+    "direct_ok": 0,
+    "proxy_only": 0,
+    "dead": 0,
+    "proxy_auth": 0,
+    "special": 0,
+}
+
+
+def is_special_keep(url):
     url_lower = url.lower()
     return any(url_lower.startswith(prefix.lower()) for prefix in SPECIAL_KEEP_PREFIXES)
 
-def is_skip_keyword(url: str) -> bool:
+
+def is_skip_keyword(url):
     url_lower = url.lower()
     return any(kw in url_lower for kw in SKIP_SPEED_KEYWORDS)
 
-def is_multicast(url: str) -> bool:
+
+def is_multicast(url):
     url_lower = url.lower()
     if url_lower.startswith(("rtp://", "udp://")):
         return True
@@ -59,146 +111,186 @@ def is_multicast(url: str) -> bool:
         return True
     return False
 
-def should_skip_speed_test(url: str) -> bool:
+
+def should_skip_speed_test(url):
     return is_special_keep(url) or is_skip_keyword(url) or is_multicast(url)
 
+
 # ====================== 路径配置 ======================
-ROOT = Path(__file__).resolve().parent.parent
+def locate_root():
+    """原来是 __file__.parent.parent 写死；脚本挪位置就找不到 config。"""
+    try:
+        here = Path(__file__).resolve()
+    except NameError:
+        _die("检测不到 __file__，请把脚本存成文件再执行，不要用管道/heredoc 喂给 python3")
+    for c in (here.parent.parent, here.parent, Path.cwd()):
+        if (c / "config").is_dir():
+            return c
+    return here.parent.parent
+
+
+ROOT = locate_root()
 CONFIG_DIR = ROOT / "config"
 OUTPUT_DIR = ROOT / "output"
-
 SOURCES_FILE = CONFIG_DIR / "sources.txt"
 RULES_FILE = CONFIG_DIR / "rules.yaml"
 KEYWORDS_FILE = CONFIG_DIR / "keywords.txt"
 BLACKLIST_FILE = CONFIG_DIR / "blacklist.txt"
 
-def load_list(path: Path):
+
+def load_list(path):
     if not path.exists():
         return []
-    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines()
+    return [line.strip() for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()
             if line.strip() and not line.startswith("#")]
 
+
 def load_rules():
-    with open(RULES_FILE, encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+    """原来是裸 open()，rules.yaml 不存在或写错就直接崩。"""
+    if not RULES_FILE.exists():
+        print("[WARN] 未找到 %s，按空规则继续" % RULES_FILE)
+        return [], {}
+    try:
+        with open(RULES_FILE, encoding="utf-8", errors="ignore") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as e:
+        print("[ERROR] 解析 rules.yaml 失败：%s，按空规则继续" % e)
+        traceback.print_exc()
+        return [], {}
+    if not isinstance(data, dict):
+        print("[ERROR] rules.yaml 顶层应为字典（rules: / settings:）")
+        return [], {}
+
     rules = []
-    for r in data.get("rules", []):
-        rules.append({
-            "pattern": re.compile(r["filter"]),
-            "rename": r.get("rename"),
-            "group": r.get("group", "未分类")
-        })
-    settings = data.get("settings", {})
+    for idx, r in enumerate(data.get("rules") or []):
+        if not isinstance(r, dict) or "filter" not in r:
+            print("[WARN] rules[%d] 缺 filter 字段，跳过：%r" % (idx, r))
+            continue
+        try:
+            rules.append({
+                "pattern": re.compile(r["filter"]),
+                "rename": r.get("rename"),
+                "replace": r.get("replace"),
+                "group": r.get("group", "未分类"),
+            })
+        except re.error as e:
+            print("[WARN] rules[%d] 正则 %r 编译失败：%s，跳过" % (idx, r.get("filter"), e))
+
+    settings = data.get("settings") or {}
+    if not isinstance(settings, dict):
+        settings = {}
+    if "force_mode" not in settings and data.get("force_mode") is not None:
+        settings["force_mode"] = data.get("force_mode")
     return rules, settings
+
 
 # ====================== 环境自动检测 ======================
 def detect_environment():
     if os.getenv("GITHUB_ACTIONS") == "true":
         return "github"
-
     if Path("/etc/openwrt_release").exists():
         return "router"
-
     uname_info = (platform.uname().release + " " + platform.uname().version).lower()
     if any(x in uname_info for x in ["openwrt", "istoreos", "immortalwrt", "lede", "pandora"]):
         return "router"
-
     return "pc"
 
-def get_runtime_config(user_settings: dict):
-    env = detect_environment()
-    print(f"检测到运行环境: {env}")
 
+ENV_DEFAULTS = {
+    "github": {"mode": "skip", "concurrency": 20, "timeout": 8, "enable_ffprobe": False,
+               "request_delay": 0.05, "keep_unicast": 8, "keep_multicast": 5},
+    "router": {"mode": "smart", "concurrency": 6, "timeout": 8, "enable_ffprobe": False,
+               "request_delay": 0.25, "keep_unicast": 5, "keep_multicast": 3},
+    "pc": {"mode": "smart", "concurrency": 16, "timeout": 6, "enable_ffprobe": True,
+           "request_delay": 0.1, "keep_unicast": 6, "keep_multicast": 4},
+}
+
+
+def _clean_proxy(value):
+    """空串/空白 -> None；socks -> None 并告警。"""
+    v = str(value or "").strip()
+    if not v:
+        return None
+    if not v.lower().startswith(("http://", "https://")):
+        print("[WARN] 代理 %r 不是 http:// 或 https:// 开头，aiohttp 不支持 socks，已忽略" % v)
+        return None
+    return v
+
+
+def get_runtime_config(user_settings):
+    env = detect_environment()
+    print("检测到运行环境: %s" % env)
     force_mode = str(user_settings.get("force_mode", "")).strip().lower()
 
-    env_defaults = {
-        "github": {
-            "mode": "skip",
-            "concurrency": 20,
-            "timeout": 8,
-            "enable_ffprobe": False,
-            "request_delay": 0.05,
-            "keep_unicast": 8,
-            "keep_multicast": 5,
-        },
-        "router": {
-            "mode": "smart",
-            "concurrency": 6,
-            "timeout": 8,
-            "enable_ffprobe": False,
-            "request_delay": 0.25,
-            "keep_unicast": 5,
-            "keep_multicast": 3,
-        },
-        "pc": {
-            "mode": "smart",
-            "concurrency": 16,
-            "timeout": 6,
-            "enable_ffprobe": True,
-            "request_delay": 0.1,
-            "keep_unicast": 6,
-            "keep_multicast": 4,
-        }
-    }
-
-    conf = env_defaults[env].copy()
-
+    conf = ENV_DEFAULTS[env].copy()
     for k, v in user_settings.items():
         if v is not None and v != "":
             conf[k] = v
-
     if force_mode in ("skip", "direct", "smart"):
         conf["mode"] = force_mode
+    elif force_mode:
+        print("[WARN] 未知 force_mode: %r（只接受 skip/direct/smart），按 smart 处理" % force_mode)
 
-    proxy = str(conf.get("proxy", "")).strip()
-    if conf["mode"] == "direct":
-        proxy = None
-    elif conf["mode"] == "smart":
-        proxy = proxy or None
-    else:
-        proxy = None
+    # ★ 代理只用于测速补测；拉取订阅另有开关，默认直连
+    probe_proxy = _clean_proxy(conf.get("proxy", ""))
+    if conf["mode"] in ("direct", "skip"):
+        probe_proxy = None
+    conf["proxy"] = probe_proxy
 
-    conf["proxy"] = proxy
+    fetch_proxy = None
+    if bool(conf.get("fetch_via_proxy", False)):
+        fetch_proxy = probe_proxy
+    conf["proxy_fetch"] = fetch_proxy
+
     conf["env"] = env
+    conf.setdefault("mark_proxy_only", True)   # 名字后加〔需代理〕
+    conf.setdefault("prefer_direct", True)     # 去重时直连源优先
+    conf.setdefault("keep_proxy_only", True)   # 是否保留"仅代理可通"的源
 
     mode_desc = {
         "skip": "跳过测速（GitHub Actions / 快速模式）",
         "direct": "纯直连测速（不使用代理）",
-        "smart": "智能测速（先直连，不够再走代理）"
+        "smart": "智能测速（先直连，<阈值再代理补测）",
     }
-    print(f"运行模式: {conf['mode']} → {mode_desc.get(conf['mode'], conf['mode'])}")
-    if conf["proxy"]:
-        print(f"代理地址: {conf['proxy']}")
-    else:
-        print("代理: 未使用")
-
+    print("运行模式: %s → %s" % (conf["mode"], mode_desc.get(conf["mode"], conf["mode"])))
+    print("拉取订阅: %s" % ("经代理 %s" % fetch_proxy if fetch_proxy else "直连（不使用代理）"))
+    print("测速补测代理: %s" % (probe_proxy if probe_proxy else "无"))
     return conf
 
-def parse_content(content: str):
+
+# ====================== 解析 ======================
+def parse_content(content):
+    """修正：允许 #EXTINF 与 URL 之间夹 #EXTGRP / 空行；名字取第一个逗号后的全部。"""
     channels = []
-    lines = content.splitlines()
+    lines = content.replace("\r\n", "\n").replace("\r", "\n").splitlines()
     i = 0
     while i < len(lines):
         line = lines[i].strip()
         if line.startswith("#EXTINF:"):
-            name = line.split(",")[-1].strip() if "," in line else "Unknown"
+            name = line.split(",", 1)[1].strip() if "," in line else "Unknown"
             group_match = re.search(r'group-title="([^"]*)"', line)
             group = group_match.group(1) if group_match else ""
             i += 1
-            if i < len(lines):
-                url = lines[i].strip()
-                if url and not url.startswith("#"):
+            while i < len(lines):
+                cand = lines[i].strip()
+                if not cand or cand.startswith("#"):
+                    i += 1
+                    continue
+                url = cand.split("#", 1)[0].split("$", 1)[0].strip()
+                if url.startswith(("http://", "https://", "rtp://", "udp://")):
                     channels.append({"name": name, "url": url, "origin_group": group})
-        elif "," in line and not line.startswith("#"):
+                break
+        elif line and not line.startswith("#") and "," in line:
             parts = line.split(",", 1)
             if len(parts) == 2 and parts[1].strip().startswith(("http", "rtp", "udp")):
                 channels.append({
                     "name": parts[0].strip(),
                     "url": parts[1].strip(),
-                    "origin_group": ""
+                    "origin_group": "",
                 })
         i += 1
     return channels
+
 
 def filter_by_blacklist(channels, blacklist):
     if not blacklist:
@@ -210,6 +302,7 @@ def filter_by_blacklist(channels, blacklist):
             result.append(ch)
     return result
 
+
 def apply_rules(channels, rules):
     result = []
     for ch in channels:
@@ -217,11 +310,23 @@ def apply_rules(channels, rules):
         matched = False
         for rule in rules:
             if rule["pattern"].search(name):
+                # 兼容旧模板的 replace 字段（原新版脚本把它丢了，写了也不生效）
+                #   replace: "CCTV5-体育"        → 正则替换（把匹配到的部分整个换掉）
+                #   replace: ["高清", "HD"]      → 纯文本替换（列表两元素：旧的、新的）
+                new_name = name
+                if rule.get("replace") is not None:
+                    rep = rule["replace"]
+                    if isinstance(rep, (list, tuple)) and len(rep) == 2:
+                        new_name = name.replace(str(rep[0]), str(rep[1])).strip() or name
+                    else:
+                        new_name = rule["pattern"].sub(str(rep), name).strip() or name
+                elif rule.get("rename"):
+                    new_name = rule["rename"]
                 result.append({
-                    "name": rule["rename"] if rule["rename"] else name,
+                    "name": new_name,
                     "url": ch["url"],
                     "group": rule["group"],
-                    "origin_name": name
+                    "origin_name": name,
                 })
                 matched = True
                 break
@@ -230,47 +335,150 @@ def apply_rules(channels, rules):
                 "name": name,
                 "url": ch["url"],
                 "group": ch.get("origin_group") or "未分类",
-                "origin_name": name
+                "origin_name": name,
             })
     return result
 
+
+# ====================== 测速 ======================
+def _fail(reason):
+    return {"ok": False, "reason": reason}
+
+
+def _http_fail(status, proxy=None):
+    """aiohttp 对 407 多数情况是"正常返回响应"而不是抛异常，所以状态码也要判。"""
+    if status == 407 and proxy:
+        return _fail("proxy_auth")
+    return _fail("http_%d" % status)
+
+
+async def hls_check(session, url, timeout, ua, proxy=None, depth=0):
+    """m3u8 分片实测。原来把播放列表当普通文件读 16KB，几 KB 秒下 → 假通过。"""
+    try:
+        async with session.get(
+            url, headers={"User-Agent": ua},
+            timeout=aiohttp.ClientTimeout(total=timeout),
+            allow_redirects=True, ssl=False, proxy=proxy,
+        ) as resp:
+            if resp.status >= 400:
+                return _http_fail(resp.status, proxy)
+            base = str(resp.url)
+            text = await resp.text(errors="ignore")
+
+        seg = None
+        for line in text.splitlines():
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            seg = s if s.startswith(("http://", "https://")) else urljoin(base, s)
+            break
+        if not seg:
+            return _fail("no_segment")
+
+        t0 = time.perf_counter()
+        async with session.get(
+            seg, headers={"User-Agent": ua, "Referer": base},
+            timeout=aiohttp.ClientTimeout(total=timeout),
+            allow_redirects=True, ssl=False, proxy=proxy,
+        ) as r2:
+            if r2.status >= 400:
+                return _http_fail(r2.status, proxy)
+            data = await _read_window(r2, SAMPLE_BYTES, SAMPLE_SECONDS)
+
+        # 一级 master playlist：跟进子列表一次
+        if depth == 0 and data.lstrip().startswith(b"#EXTM3U"):
+            return await hls_check(session, seg, timeout, ua, proxy, depth=1)
+
+        elapsed = time.perf_counter() - t0
+        if elapsed <= 0 or len(data) < 1024:
+            return _fail("seg_too_small")
+        return {
+            "ok": True,
+            "latency_ms": round(elapsed * 1000, 1),
+            "speed_kbps": round(len(data) * 8 / elapsed / 1000, 1),
+        }
+    except Exception as e:
+        return _fail(_classify_error(e))
+
+
+def _classify_error(e):
+    status = getattr(e, "status", None)
+    if status == 407:
+        return "proxy_auth"
+    if status:
+        return "http_%s" % status
+    return "err:%s" % type(e).__name__
+
+
+# 采样窗口：读满 64KB 或读够 1 秒，谁先到停谁。
+# 原来固定读 16KB 的毛病：百兆链路上 1 毫秒就读完 → 速度被算成天上（假高）；
+# 慢链路上 16KB 读不满 → 直接判不通（假低）。窗口化之后两端都稳。
+SAMPLE_BYTES = 64 * 1024
+SAMPLE_SECONDS = 1.0
+MIN_BYTES = 1024
+
+
+async def _read_window(resp, max_bytes, max_seconds):
+    buf = b""
+    deadline = time.perf_counter() + max_seconds
+    while len(buf) < max_bytes:
+        remain = deadline - time.perf_counter()
+        if remain <= 0:
+            break
+        try:
+            part = await asyncio.wait_for(resp.content.read(8192), timeout=remain)
+        except asyncio.TimeoutError:
+            break
+        if not part:
+            break
+        buf += part
+    return buf
+
+
 async def light_check(session, url, timeout, ua, proxy=None):
+    """返回统一 dict：成功 {ok:True, speed_kbps, latency_ms}；失败 {ok:False, reason}。"""
+    if ".m3u8" in url.lower():
+        return await hls_check(session, url, timeout, ua, proxy)
+
     start = time.perf_counter()
     try:
-        headers = {"User-Agent": ua}
         async with session.get(
             url,
-            headers=headers,
+            headers={"User-Agent": ua},
             timeout=aiohttp.ClientTimeout(total=timeout),
             allow_redirects=True,
             ssl=False,
-            proxy=proxy
+            proxy=proxy,
         ) as resp:
             if resp.status >= 400:
-                return None
-            chunk = await resp.content.read(16 * 1024)
+                return _http_fail(resp.status, proxy)
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            if "mpegurl" in ctype:
+                return await hls_check(session, str(resp.url), timeout, ua, proxy)
+
+            chunk = await _read_window(resp, SAMPLE_BYTES, SAMPLE_SECONDS)
             elapsed = time.perf_counter() - start
-            if elapsed <= 0 or len(chunk) < 1024:
-                return None
-            speed_kbps = (len(chunk) * 8) / elapsed / 1000
+            if elapsed <= 0 or len(chunk) < MIN_BYTES:
+                return _fail("too_small_or_slow")
+
+            head = chunk[:200].decode("utf-8", errors="ignore")
+            if "#EXTM3U" in head or "#EXTINF" in head:
+                return await hls_check(session, str(resp.url), timeout, ua, proxy)
+
             return {
+                "ok": True,
                 "latency_ms": round(elapsed * 1000, 1),
-                "speed_kbps": round(speed_kbps, 1),
-                "ok": True
+                "speed_kbps": round(len(chunk) * 8 / elapsed / 1000, 1),
             }
-    except Exception:
-        return None
+    except Exception as e:
+        return _fail(_classify_error(e))
+
 
 def ffprobe_check(url, timeout=10, proxy=None):
     if not shutil.which("ffprobe"):
-        return {
-            "ok": True, "has_video": True, "has_audio": True,
-            "resolution": "unknown", "codec": "unknown", "width": 0, "height": 0
-        }
-
+        return {"ok": True, "skipped": True}
     cmd = [
-        "ffprobe",
-        "-v", "error",
+        "ffprobe", "-v", "error",
         "-show_entries", "stream=codec_type,width,height,codec_name",
         "-of", "csv=p=0",
         "-timeout", str(timeout * 1000000),
@@ -279,16 +487,13 @@ def ffprobe_check(url, timeout=10, proxy=None):
     if proxy:
         cmd.extend(["-http_proxy", proxy])
     cmd.append(url)
-
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 2)
         if result.returncode != 0:
             return None
-
         has_video = has_audio = False
         width = height = 0
         video_codec = audio_codec = "unknown"
-
         for line in result.stdout.strip().splitlines():
             parts = [p.strip() for p in line.split(",")]
             if not parts:
@@ -303,21 +508,20 @@ def ffprobe_check(url, timeout=10, proxy=None):
                 has_audio = True
                 if len(parts) >= 2:
                     audio_codec = parts[-1]
-
         if not has_video and not has_audio:
             return None
-
         return {
             "ok": True,
             "has_video": has_video,
             "has_audio": has_audio,
-            "resolution": f"{width}x{height}" if width and height else "unknown",
+            "resolution": "%dx%d" % (width, height) if width and height else "unknown",
             "codec": video_codec if has_video else audio_codec,
             "width": width,
-            "height": height
+            "height": height,
         }
     except Exception:
         return None
+
 
 async def two_stage_test(channels, conf):
     mode = conf["mode"]
@@ -331,52 +535,85 @@ async def two_stage_test(channels, conf):
     min_speed = conf.get("min_speed_kbps", 100)
     enable_ffprobe = conf.get("enable_ffprobe", False)
     ffprobe_timeout = conf.get("ffprobe_timeout", 10)
-    audio_only_group = conf.get("audio_only_group", "").strip()
+    audio_only_group = (conf.get("audio_only_group") or "").strip()
     proxy = conf.get("proxy")
     request_delay = conf.get("request_delay", 0.2)
+    total = len(channels)
 
-    print(f"测速参数 → 并发:{concurrency} | 超时:{timeout}s | 最低速度:{min_speed}kbps | 间隔:{request_delay}s")
-    print(f"FFprobe: {'开启' if enable_ffprobe else '关闭'}")
+    print("测速参数 → 并发:%s | 超时:%ss | 最低速度:%skbps | 间隔:%ss" % (concurrency, timeout, min_speed, request_delay))
+    print("FFprobe: %s" % ("开启" if enable_ffprobe else "关闭"))
+    if mode == "smart":
+        print("策略: 直连不足 %skbps 时，再用代理补测一次" % min_speed)
+        print("测速补测代理: %s" % (proxy if proxy else "无（只测直连）"))
 
     sem = asyncio.Semaphore(concurrency)
     light_passed = []
 
     async def light_worker(ch):
         if should_skip_speed_test(ch["url"]):
-            ch.update({"latency_ms": 0, "speed_kbps": 99999, "ok": True, "special_keep": True})
+            ch.update({"latency_ms": 0, "speed_kbps": 99999, "ok": True,
+                       "special_keep": True, "via_proxy": False})
             light_passed.append(ch)
+            STATS["special"] += 1
+            STATS["done"] += 1
             return
 
         async with sem:
+            # ① 直连
             res = await light_check(session, ch["url"], timeout, ua, proxy=None)
-            if res and res["ok"] and res["speed_kbps"] >= min_speed:
+            if not res.get("ok") and str(res.get("reason", "")).startswith(("err:", "too_small")):
+                # 网络抖动重试一次：别让一个好源因为一次 1 秒探测失手被误杀
+                await asyncio.sleep(0.15)
+                res = await light_check(session, ch["url"], timeout, ua, proxy=None)
+            if res.get("ok") and res.get("speed_kbps", 0) >= min_speed:
                 ch.update(res)
+                ch["via_proxy"] = False
+                ch["direct_kbps"] = res["speed_kbps"]
                 light_passed.append(ch)
-                return
+                STATS["direct_ok"] += 1
+            else:
+                ch["direct_kbps"] = res.get("speed_kbps", 0) if res.get("ok") else 0
 
-            if mode == "smart" and proxy:
-                await asyncio.sleep(request_delay)
-                res_proxy = await light_check(session, ch["url"], timeout, ua, proxy=proxy)
-                if res_proxy and res_proxy["ok"] and res_proxy["speed_kbps"] >= min_speed:
-                    ch.update(res_proxy)
-                    ch["via_proxy"] = True
-                    light_passed.append(ch)
-                    return
+                # ② 直连 <阈值 才走代理补测
+                if mode == "smart" and proxy:
+                    await asyncio.sleep(request_delay)
+                    rp = await light_check(session, ch["url"], timeout, ua, proxy=proxy)
+                    if rp.get("ok") and rp.get("speed_kbps", 0) >= min_speed:
+                        ch.update(rp)
+                        ch["via_proxy"] = True
+                        ch["proxy_kbps"] = rp["speed_kbps"]
+                        light_passed.append(ch)
+                        STATS["proxy_only"] += 1
+                    else:
+                        if rp.get("reason") == "proxy_auth":
+                            STATS["proxy_auth"] += 1
+                        STATS["dead"] += 1
+                else:
+                    STATS["dead"] += 1
 
-    connector = aiohttp.TCPConnector(
-        limit=concurrency,
-        ssl=False,
-        ttl_dns_cache=300,
-        force_close=True,
-        enable_cleanup_closed=True
-    )
+            STATS["done"] += 1
+            if STATS["done"] % 200 == 0 or STATS["done"] == total:
+                print("  进度 %d/%d | 直连通过 %d | 仅代理 %d | 不通 %d%s"
+                      % (STATS["done"], total, STATS["direct_ok"], STATS["proxy_only"],
+                         STATS["dead"], "（代理认证失败 %d）" % STATS["proxy_auth"] if STATS["proxy_auth"] else ""))
 
+    connector = aiohttp.TCPConnector(limit=concurrency * 2, ssl=False, ttl_dns_cache=300,
+                                     force_close=True, enable_cleanup_closed=True)
     async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
         await asyncio.gather(*(light_worker(ch) for ch in channels))
 
-    print(f"初筛通过: {len(light_passed)} / {len(channels)}")
+    print("初筛通过: %d / %d  （直连 %d | 仅代理 %d | 不通 %d）"
+          % (len(light_passed), total, STATS["direct_ok"], STATS["proxy_only"], STATS["dead"]))
+
+    if STATS["proxy_auth"]:
+        print("[WARN] 有 %d 个源在代理补测时返回 407（代理需要账号密码）。" % STATS["proxy_auth"])
+        print("       这意味着这些源被当成「不通」丢掉了，实际可能是代理把请求拒了。")
+        print("       先跑：python3 scripts/update_iptv.py --check-proxy 确认。")
 
     if not enable_ffprobe or not light_passed:
+        return light_passed
+    if not shutil.which("ffprobe"):
+        print("[WARN] 未找到 ffprobe，深度检测跳过（不影响初筛结果）")
         return light_passed
 
     print("开始 FFprobe 深度检测...")
@@ -399,108 +636,384 @@ async def two_stage_test(channels, conf):
                 deep_passed.append(ch)
 
     await asyncio.gather(*(deep_worker(ch) for ch in light_passed))
-    print(f"深度检测通过: {len(deep_passed)} / {len(light_passed)}")
+    print("深度检测通过: %d / %d" % (len(deep_passed), len(light_passed)))
     return deep_passed
 
-def dedup_and_select(channels, keep_unicast=6, keep_multicast=4):
+
+# ====================== 去重与输出 ======================
+BRACKET_RE = re.compile(r"[（(【\[][^)）】\]]{0,20}[)）】\]]")
+NOISE_RE = re.compile(
+    r"(?i)(?:ipv6|hevc|h\.?265|h\.?264|hdr|uhd|fhd|4k|8k|高清|超清|标清|\d{3,4}[pP]"
+    r"|(?<![a-z])(?:hd|sd)(?![a-z]))"
+)
+
+
+def dedup_key(name):
+    """让「CCTV-1」「CCTV1 高清」「CCTV-1 HD」归到同一个频道。
+
+    原来只去掉空格/-/_，这三条会被当成三个不同频道，各留若干条重复源。
+    """
+    s = BRACKET_RE.sub("", str(name))
+    s = NOISE_RE.sub("", s)
+    s = re.sub(r"[\s\-_·•|]+", "", s)
+    return s.lower() or str(name).lower()
+
+
+def dedup_and_select(channels, keep_unicast=6, keep_multicast=4, prefer_direct=True,
+                     keep_proxy_only=True):
     groups = defaultdict(list)
     for ch in channels:
-        key = re.sub(r'[\s\-_]+', '', ch["name"]).lower()
-        groups[key].append(ch)
+        groups[dedup_key(ch["name"])].append(ch)
+
+    def rank(x):
+        # 直连可用优先（你的电视是直连播的，走代理才通的源大概率放不出来）
+        return (
+            0 if not x.get("via_proxy") else 1 if prefer_direct else 0,
+            -x.get("speed_kbps", 0),
+            x.get("latency_ms", 9999),
+        )
 
     final = []
     for items in groups.values():
         unicast, multicast = [], []
         for ch in items:
+            if not keep_proxy_only and ch.get("via_proxy"):
+                continue
             if is_multicast(ch["url"]) or ch.get("special_keep"):
                 multicast.append(ch)
             else:
                 unicast.append(ch)
-
-        unicast.sort(key=lambda x: (-x.get("speed_kbps", 0), x.get("latency_ms", 9999)))
-        multicast.sort(key=lambda x: (-x.get("speed_kbps", 0), x.get("latency_ms", 9999)))
-
+        unicast.sort(key=rank)
+        multicast.sort(key=rank)
         final.extend(unicast[:keep_unicast])
         final.extend(multicast[:keep_multicast])
     return final
 
-def generate_m3u(channels):
+
+def _safe_text(text):
+    """txt 格式用逗号分隔，名称/分组里的中英文逗号会把行拆坏。"""
+    return str(text).replace(",", " ").replace("，", " ").strip()
+
+
+def _display_name(ch, conf):
+    name = str(ch["name"])
+    if ch.get("via_proxy") and conf.get("mark_proxy_only", True):
+        return name + "〔需代理〕"
+    return name
+
+
+GROUP_ORDER = ["央视", "卫视", "省内", "港澳台", "影视", "体育", "新闻", "纪录",
+               "少儿", "戏曲", "音乐", "生活", "教育", "广播", "军事", "未分类"]
+
+
+def _natural_key(text):
+    return tuple(int(p) if p.isdigit() else p.lower()
+                 for p in re.split(r"(\d+)", str(text)))
+
+
+def _group_rank(group):
+    g = str(group)
+    for i, kw in enumerate(GROUP_ORDER):
+        if kw in g:
+            return i
+    return len(GROUP_ORDER)
+
+
+def _name_rank(name):
+    """CCTV 按数字排（CCTV-2 在 CCTV-10 前面），其余按自然序。"""
+    m = re.search(r"(?i)CCTV[\s\-]?(\d+)(\+)?", str(name))
+    if m:
+        return (0, int(m.group(1)), 1 if m.group(2) else 0) + _natural_key(name)
+    return (1, 0, 0) + _natural_key(name)
+
+
+def channel_sort_key(ch):
+    group = str(ch.get("group", ""))
+    return (_group_rank(group), group, _name_rank(ch.get("name", "")))
+
+
+def generate_m3u(channels, conf=None):
+    conf = conf or {}
     lines = ['#EXTM3U']
-    channels.sort(key=lambda x: (x["group"], x["name"]))
+    channels = sorted(channels, key=channel_sort_key)
     for ch in channels:
-        lines.append(f'#EXTINF:-1 group-title="{ch["group"]}",{ch["name"]}')
+        lines.append('#EXTINF:-1 group-title="%s",%s'
+                     % (_safe_text(ch["group"]), _safe_text(_display_name(ch, conf))))
         lines.append(ch["url"])
     return "\n".join(lines)
 
-def generate_txt(channels):
+
+def generate_txt(channels, conf=None):
+    conf = conf or {}
     lines = []
-    channels.sort(key=lambda x: (x["group"], x["name"]))
+    channels = sorted(channels, key=channel_sort_key)
     current = None
     for ch in channels:
-        if ch["group"] != current:
-            lines.append(f'{ch["group"]},#genre#')
-            current = ch["group"]
-        lines.append(f'{ch["name"]},{ch["url"]}')
+        group = _safe_text(ch["group"])
+        if group != current:
+            lines.append('%s,#genre#' % group)
+            current = group
+        lines.append('%s,%s' % (_safe_text(_display_name(ch, conf)), ch["url"]))
     return "\n".join(lines)
+
+
+def write_proxy_report(channels, path):
+    """把"只有代理才通"的源单独列一份，方便你核对。"""
+    rows = [ch for ch in channels if ch.get("via_proxy")]
+    lines = [
+        "# 以下频道的直连速度低于阈值，只有走代理补测才达到阈值",
+        "# 这些源在你的电视/盒子上直连大概率放不出来，仅作参考",
+        "# 频道名 | 直连kbps | 代理kbps | URL",
+    ]
+    for ch in sorted(rows, key=lambda x: x["name"]):
+        lines.append("%s | %s | %s | %s" % (
+            ch["name"], ch.get("direct_kbps", 0), ch.get("proxy_kbps", 0), ch["url"]))
+    atomic_write(path, "\n".join(lines) + "\n")
+    return len(rows)
+
+
+def atomic_write(path, text):
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+# ====================== 代理体检 ======================
+TEST_URL = "https://cdn.jsdelivr.net/gh/luochen1975/2026myvt2@main/output/iptv.txt"
+
+
+async def check_proxy_cmd(conf):
+    proxy = conf.get("proxy")
+    print("=== 代理体检 ===")
+    print("目标: %s" % TEST_URL)
+    print("代理: %s" % (proxy if proxy else "未配置"))
+    async with aiohttp.ClientSession(trust_env=False) as session:
+        # 1) 直连
+        try:
+            t0 = time.perf_counter()
+            async with session.get(TEST_URL, timeout=aiohttp.ClientTimeout(total=15),
+                                   ssl=False, proxy=None) as r:
+                n = len(await r.read())
+            print("[直连] HTTP %d，%d 字节，%.2fs → %s"
+                  % (r.status, n, time.perf_counter() - t0, "可用" if r.status == 200 and n else "异常"))
+        except Exception as e:
+            print("[直连] %s: %s" % (type(e).__name__, e))
+
+        if not proxy:
+            print("\n结论: 没配代理，拉取和测速都走直连。")
+            return
+
+        # 2) 走代理
+        try:
+            t0 = time.perf_counter()
+            async with session.get(TEST_URL, timeout=aiohttp.ClientTimeout(total=15),
+                                   ssl=False, proxy=proxy) as r:
+                n = len(await r.read())
+            print("[代理] HTTP %d，%d 字节，%.2fs → %s"
+                  % (r.status, n, time.perf_counter() - t0, "不需要账号密码" if r.status == 200 else "异常"))
+            if r.status == 200:
+                print("\n结论: 代理可用且【不需要】账号密码。")
+            elif r.status == 407:
+                print("\n结论: 代理【需要】账号密码。")
+        except Exception as e:
+            status = getattr(e, "status", None)
+            if status == 407:
+                print("[代理] 407 Proxy Authentication Required")
+                print("\n结论: 代理【需要】账号密码。两种改法：")
+                print("  A) rules.yaml 里写 http://用户名:密码@127.0.0.1:7890（特殊字符先 URL 编码）")
+                print("  B) mihomo 配置里把 authentication 清空后重启，端口就不再要密码")
+            else:
+                print("[代理] %s: %s" % (type(e).__name__, e))
+                print("\n结论: 连不上代理。可能没启动，或端口不是 HTTP/mixed 端口。")
+
+
+# ====================== 拉取 ======================
+async def fetch_sources(urls, conf):
+    """★ 订阅一律直连：proxy 写死 None，不再读 conf["proxy"]。
+
+    只有显式设置 fetch_via_proxy: true 时才用代理（默认关闭）。
+    """
+    all_channels = []
+    proxy = conf.get("proxy_fetch")
+    print("拉取方式: %s" % ("代理 %s" % proxy if proxy else "直连"))
+    async with aiohttp.ClientSession(trust_env=False) as session:
+        for url in urls:
+            print("拉取: %s" % url)
+            content = None
+            for attempt in (1, 2):
+                ssl_opt = True          # 先正常校验；只有 SSL 相关错误才降级重试
+                for _try in range(2):
+                    try:
+                        async with session.get(
+                            url,
+                            timeout=aiohttp.ClientTimeout(total=20),
+                            proxy=proxy,        # 默认 None = 直连
+                            ssl=ssl_opt,
+                            allow_redirects=True,
+                        ) as resp:
+                            if resp.status >= 400:
+                                if resp.status == 407 and proxy:
+                                    print("  [代理需要认证] 407：%s" % proxy)
+                                    print("  先跑 --check-proxy 确认，或把 fetch_via_proxy 关掉走直连")
+                                    return all_channels
+                                print("  HTTP %d" % resp.status)
+                                break
+                            raw = await resp.read()
+                        for enc in ("utf-8", "gb18030"):
+                            try:
+                                content = raw.decode(enc)
+                                break
+                            except UnicodeDecodeError:
+                                content = None
+                        break                   # 拿到响应（无论解码成败）就退出重试
+                    except Exception as e:
+                        status = getattr(e, "status", None)
+                        if status == 407:
+                            print("  [代理需要认证] 407：%s" % proxy)
+                            print("  请跑 --check-proxy，或把 fetch_via_proxy 关掉")
+                            return all_channels
+                        if ssl_opt and ("SSL" in type(e).__name__ or "Certificate" in str(e)):
+                            ssl_opt = False
+                            continue            # 路由 CA 包不全，降级再试一次
+                        print("  第 %d 次失败: %s: %s" % (attempt, type(e).__name__, e))
+                        break
+                if content:
+                    break
+                if attempt == 1:
+                    await asyncio.sleep(1)
+            if not content:
+                print("  → 放弃该源")
+                continue
+            chs = parse_content(content)
+            print("  → %d 个" % len(chs))
+            all_channels.extend(chs)
+    return all_channels
+
+
+# ====================== 主流程 ======================
+def _arg_value(argv, key, default=None):
+    if key in argv:
+        i = argv.index(key)
+        if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+            return argv[i + 1]
+    return default
+
 
 async def main():
     print("=== 加载配置 ===")
     rules, user_settings = load_rules()
     blacklist = load_list(BLACKLIST_FILE)
-
     conf = get_runtime_config(user_settings)
+    print("最终并发: %s" % conf.get("concurrency"))
+    print("最低速度: %s kbps" % conf.get("min_speed_kbps", 100))
 
-    print(f"最终并发: {conf.get('concurrency')}")
-    print(f"最低速度: {conf.get('min_speed_kbps', 100)} kbps")
+    # 抽样参数：14395 条 × 并发 6 要跑几小时，先拿几十条验证整条链路
+    argv = sys.argv[1:]
+    group_kw = _arg_value(argv, "--group", "") or ""
+    limit = 0
+    _lim = _arg_value(argv, "--limit")
+    if _lim:
+        try:
+            limit = max(0, int(_lim))
+        except ValueError:
+            print("[WARN] --limit 后面要写整数，已忽略")
 
     print("\n=== 拉取源 ===")
     urls = load_list(SOURCES_FILE)
-    all_channels = []
-
-    proxy_for_fetch = conf.get("proxy")
-    async with aiohttp.ClientSession() as session:
-        for url in urls:
-            print(f"拉取: {url}")
-            try:
-                async with session.get(url, timeout=30, proxy=proxy_for_fetch) as resp:
-                    content = await resp.text(encoding="utf-8", errors="ignore")
-                    chs = parse_content(content)
-                    print(f"  → {len(chs)} 个")
-                    all_channels.extend(chs)
-            except Exception as e:
-                print(f"  失败: {e}")
-
-    print(f"原始总计: {len(all_channels)}")
+    if not urls:
+        _die("%s 为空或不存在，每行写一个订阅地址" % SOURCES_FILE)
+    all_channels = await fetch_sources(urls, conf)
+    print("原始总计: %d" % len(all_channels))
+    if not all_channels:
+        _die("一条源都没拉到。先跑 --check-proxy 排查网络/代理，别去看测速")
 
     print("\n=== 黑名单剔除 ===")
     all_channels = filter_by_blacklist(all_channels, blacklist)
-    print(f"黑名单后: {len(all_channels)}")
+    print("黑名单后: %d" % len(all_channels))
 
     print("\n=== 应用重命名/分组 ===")
     all_channels = apply_rules(all_channels, rules)
+
+    if group_kw:
+        all_channels = [c for c in all_channels if group_kw in str(c.get("group", ""))]
+        print("按分组筛选「%s」后: %d" % (group_kw, len(all_channels)))
+        if not all_channels:
+            _die("分组「%s」筛完 0 条，检查关键字是否和 rules.yaml 里的 group 一致" % group_kw)
+
+    sample_mode = bool(limit or group_kw)
+    if limit and limit < len(all_channels):
+        all_channels = random.Random(0).sample(all_channels, limit)
+        print("抽样: 随机取 %d 条验证流程（去掉 --limit 即全量）" % limit)
 
     print("\n=== 测速阶段 ===")
     tested = await two_stage_test(all_channels, conf)
 
     keep_unicast = conf.get("keep_unicast", 6)
     keep_multicast = conf.get("keep_multicast", 4)
-    print(f"\n=== 去重优选（非组播≤{keep_unicast}，组播≤{keep_multicast}） ===")
-    final = dedup_and_select(tested, keep_unicast=keep_unicast, keep_multicast=keep_multicast)
-    print(f"最终保留: {len(final)}")
+    print("\n=== 去重优选（非组播≤%s，组播≤%s） ===" % (keep_unicast, keep_multicast))
+    final = dedup_and_select(
+        tested,
+        keep_unicast=keep_unicast,
+        keep_multicast=keep_multicast,
+        prefer_direct=bool(conf.get("prefer_direct", True)),
+        keep_proxy_only=bool(conf.get("keep_proxy_only", True)),
+    )
+    print("最终保留: %d" % len(final))
 
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    n_proxy_only = len([c for c in final if c.get("via_proxy")])
+    if n_proxy_only:
+        print("其中【仅代理可通】%d 条（名字带〔需代理〕，另见 output/仅代理可用.txt）" % n_proxy_only)
+
+    # ★ 0 条不覆盖，避免一次网络抖动把列表写成空文件
+    if not final:
+        _die("最终 0 条，拒绝覆盖已有输出（旧文件保持不动）", code=3)
+
+    try:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        _die("输出目录不可写：%s\n%s\n（软路由 /usr 只读时，把项目放到 /root 或 /mnt）" % (OUTPUT_DIR, e))
 
     if conf["mode"] == "skip":
-        m3u_path = OUTPUT_DIR / "iptv.m3u"
-        txt_path = OUTPUT_DIR / "iptv.txt"
+        m3u_path, txt_path = OUTPUT_DIR / "iptv.m3u", OUTPUT_DIR / "iptv.txt"
     else:
-        m3u_path = OUTPUT_DIR / "移动iptv.m3u"
-        txt_path = OUTPUT_DIR / "移动iptv.txt"
+        m3u_path, txt_path = OUTPUT_DIR / "移动iptv.m3u", OUTPUT_DIR / "移动iptv.txt"
+    report_path = OUTPUT_DIR / "仅代理可用.txt"
+    if sample_mode:
+        # 抽样只写 _抽样 后缀，绝不覆盖正在用的正式列表
+        m3u_path = m3u_path.with_name(m3u_path.stem + "_抽样" + m3u_path.suffix)
+        txt_path = txt_path.with_name(txt_path.stem + "_抽样" + txt_path.suffix)
+        report_path = report_path.with_name(report_path.stem + "_抽样" + report_path.suffix)
 
-    m3u_path.write_text(generate_m3u(final), encoding="utf-8")
-    txt_path.write_text(generate_txt(final), encoding="utf-8")
-    print(f"\n已生成: {m3u_path}")
-    print(f"已生成: {txt_path}")
+    try:
+        atomic_write(m3u_path, generate_m3u(final, conf))
+        atomic_write(txt_path, generate_txt(final, conf))
+        if n_proxy_only:
+            write_proxy_report(final, report_path)
+            print("已生成: %s" % report_path)
+        elif report_path.exists():
+            report_path.unlink()      # 清掉上次的残留，否则看起来像"这次也有"
+            print("已清理上次残留: %s（本次没有仅代理可通的源）" % report_path)
+    except PermissionError as e:
+        _die("没有写权限：%s（软路由 /usr 只读，换到 /root 或 /mnt）" % e)
+
+    print("\n已生成: %s" % m3u_path)
+    print("已生成: %s" % txt_path)
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        if "--check-proxy" in sys.argv[1:]:
+            rules, user_settings = load_rules()
+            conf = get_runtime_config(user_settings)
+            asyncio.run(check_proxy_cmd(conf))
+        else:
+            asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n已中断")
+    except SystemExit:
+        raise
+    except Exception:
+        print("\n[FATAL] 未捕获异常：", file=sys.stderr)
+        traceback.print_exc()
+        sys.exit(1)
