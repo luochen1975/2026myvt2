@@ -93,31 +93,24 @@ def load_rules():
 
 # ====================== 环境自动检测 ======================
 def detect_environment():
-    """自动判断当前运行环境"""
-    # 1. GitHub Actions
     if os.getenv("GITHUB_ACTIONS") == "true":
         return "github"
 
-    # 2. 路由器（OpenWrt / iStoreOS / ImmortalWrt 等）
     if Path("/etc/openwrt_release").exists():
         return "router"
-    
+
     uname_info = (platform.uname().release + " " + platform.uname().version).lower()
     if any(x in uname_info for x in ["openwrt", "istoreos", "immortalwrt", "lede", "pandora"]):
         return "router"
 
-    # 3. 其他都当电脑端
     return "pc"
 
 def get_runtime_config(user_settings: dict):
-    """根据环境自动生成运行参数"""
     env = detect_environment()
     print(f"检测到运行环境: {env}")
 
-    # 用户强制指定模式优先
     force_mode = str(user_settings.get("force_mode", "")).strip().lower()
-    
-    # 环境默认参数
+
     env_defaults = {
         "github": {
             "mode": "skip",
@@ -129,10 +122,10 @@ def get_runtime_config(user_settings: dict):
             "keep_multicast": 5,
         },
         "router": {
-            "mode": "smart",          # 有代理就走 smart，没有就实际变成 direct
+            "mode": "smart",
             "concurrency": 6,
             "timeout": 8,
-            "enable_ffprobe": False,  # 路由器默认关闭 ffprobe
+            "enable_ffprobe": False,
             "request_delay": 0.25,
             "keep_unicast": 5,
             "keep_multicast": 3,
@@ -150,30 +143,26 @@ def get_runtime_config(user_settings: dict):
 
     conf = env_defaults[env].copy()
 
-    # 用户配置覆盖默认值
     for k, v in user_settings.items():
         if v is not None and v != "":
             conf[k] = v
 
-    # 处理强制模式
     if force_mode in ("skip", "direct", "smart"):
         conf["mode"] = force_mode
 
-    # 处理代理
     proxy = str(conf.get("proxy", "")).strip()
     if conf["mode"] == "direct":
         proxy = None
     elif conf["mode"] == "smart":
         proxy = proxy or None
-    else:  # skip
+    else:
         proxy = None
 
     conf["proxy"] = proxy
     conf["env"] = env
 
-    # 最终模式说明
     mode_desc = {
-        "skip": "跳过测速（GitHub Actions / 电脑快速模式）",
+        "skip": "跳过测速（GitHub Actions / 快速模式）",
         "direct": "纯直连测速（不使用代理）",
         "smart": "智能测速（先直连，不够再走代理）"
     }
@@ -359,14 +348,12 @@ async def two_stage_test(channels, conf):
             return
 
         async with sem:
-            # 1. 永远先直连
             res = await light_check(session, ch["url"], timeout, ua, proxy=None)
             if res and res["ok"] and res["speed_kbps"] >= min_speed:
                 ch.update(res)
                 light_passed.append(ch)
                 return
 
-            # 2. 只有 smart 模式且配置了代理，才再测一次代理
             if mode == "smart" and proxy:
                 await asyncio.sleep(request_delay)
                 res_proxy = await light_check(session, ch["url"], timeout, ua, proxy=proxy)
@@ -375,8 +362,6 @@ async def two_stage_test(channels, conf):
                     ch["via_proxy"] = True
                     light_passed.append(ch)
                     return
-
-            # 3. 不达标直接丢弃
 
     connector = aiohttp.TCPConnector(
         limit=concurrency,
@@ -463,7 +448,6 @@ async def main():
     rules, user_settings = load_rules()
     blacklist = load_list(BLACKLIST_FILE)
 
-    # 自动判断环境并生成最终运行配置
     conf = get_runtime_config(user_settings)
 
     print(f"最终并发: {conf.get('concurrency')}")
