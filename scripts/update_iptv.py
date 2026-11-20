@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""IPTV 源拉取 / 测速 / 去重 + 可选自动地理分组（规则优先兜底模式）
-新增：settings.auto_geo_group 开关；仅 group="未分类" 才尝试区划匹配；区划加载失败降级不中断
+"""IPTV 源拉取 / 测速 / 去重 + 自动地理分组【修复版】
+修复：地理分组无法正确拿到省市、全部停留在未分类问题；增加 geo 调试日志
+策略：rules 分配 group != "未分类" → 保留；仅 group == "未分类" 才尝试地理识别
 """
 
 import asyncio
@@ -55,7 +56,9 @@ ALIAS_MAP = {
 
 name_to_node: dict = {}
 name_list_long_first: list[str] = []
+node_parent: dict = {}
 geo_ready = False
+debug_geo = False
 
 
 def download_geo_json() -> dict | None:
@@ -89,46 +92,38 @@ def load_geo_data() -> dict | None:
 
 
 def build_geo_index(tree: dict):
-    global name_to_node, name_list_long_first, geo_ready
+    global name_to_node, name_list_long_first, node_parent, geo_ready
     name_to_node.clear()
-    stack = list(tree.values())
+    node_parent.clear()
+    stack = [(node, None) for node in tree.values()]
     while stack:
-        node = stack.pop()
+        node, parent = stack.pop()
         name = node["name"]
         name_to_node[name] = node
-        stack.extend(node.get("children", {}).values())
+        node_parent[node["code"]] = parent
+        children = node.get("children", {})
+        stack.extend((child, node) for child in children.values())
     name_list_long_first = sorted(name_to_node.keys(), key=len, reverse=True)
     geo_ready = True
 
 
-def get_parent_chain(node: dict) -> tuple[str | None, str | None, str | None]:
-    code = node["code"]
-    prov, city, dist = None, None, None
-    if len(code) == 6:
-        if code.endswith("0000"):
-            prov = node["name"]
-        elif code.endswith("00"):
-            city = node["name"]
-            prov_code = code[:2] + "0000"
-            prov_node = name_to_node.get(prov_code)
-            if prov_node:
-                prov = prov_node["name"]
-        else:
-            dist = node["name"]
-            city_code = code[:4] + "00"
-            city_node = name_to_node.get(city_code)
-            if city_node:
-                city = city_node["name"]
-            prov_code = code[:2] + "0000"
-            prov_node = name_to_node.get(prov_code)
-            if prov_node:
-                prov = prov_node["name"]
-    return prov, city, dist
+def get_prov_city_from_node(node: dict):
+    cur = node
+    city = None
+    prov = None
+    while cur is not None:
+        p = node_parent.get(cur["code"])
+        if p is None:
+            prov = cur["name"]
+            break
+        city = cur["name"]
+        cur = p
+    return prov, city
 
 
 def match_geo_from_channel(channel_name: str) -> dict:
     if not geo_ready:
-        return {"province": None, "city": None, "district": None, "group": None}
+        return {"province": None, "city": None, "group": None}
     text = channel_name
     for alias, std_name in ALIAS_MAP.items():
         text = text.replace(alias, std_name)
@@ -137,19 +132,23 @@ def match_geo_from_channel(channel_name: str) -> dict:
             if geo_name in IGNORED_GEO_NAMES:
                 continue
             node = name_to_node[geo_name]
-            prov, city, dist = get_parent_chain(node)
+            prov, city = get_prov_city_from_node(node)
             if prov:
-                grp = f"{prov}/{city}" if city else prov
+                if city:
+                    grp = f"{prov}/{city}"
+                else:
+                    grp = prov
                 return {
                     "province": prov,
                     "city": city,
-                    "district": dist,
                     "group": grp
                 }
-    return {"province": None, "city": None, "district": None, "group": None}
+    return {"province": None, "city": None, "group": None}
 
 
-def init_geo_auto_group() -> bool:
+def init_geo_auto_group(debug=False) -> bool:
+    global debug_geo
+    debug_geo = debug
     data = load_geo_data()
     if not data:
         print("[WARN] 区划数据加载失败，自动地理分组关闭")
@@ -166,8 +165,11 @@ def apply_auto_geo_group(channels, enabled: bool):
         if ch.get("group") != "未分类":
             continue
         geo = match_geo_from_channel(ch["name"])
-        if geo.get("group"):
-            ch["group"] = geo["group"]
+        g = geo.get("group")
+        if g:
+            ch["group"] = g
+            if debug_geo:
+                print(f"[GEO-DEBUG] {ch['name']} → {g}")
 
 
 # ====================== 不测速直接保留的规则 ======================
@@ -313,11 +315,11 @@ def detect_environment():
 
 ENV_DEFAULTS = {
     "github": {"mode": "skip", "concurrency": 20, "timeout": 8, "enable_ffprobe": False,
-               "request_delay": 0.05, "keep_unicast": 8, "keep_multicast": 5, "auto_geo_group": False},
+               "request_delay": 0.05, "keep_unicast": 8, "keep_multicast": 5, "auto_geo_group": False, "debug_geo": False},
     "router": {"mode": "smart", "concurrency": 6, "timeout": 8, "enable_ffprobe": False,
-               "request_delay": 0.25, "keep_unicast": 5, "keep_multicast": 3, "auto_geo_group": False},
+               "request_delay": 0.25, "keep_unicast": 5, "keep_multicast": 3, "auto_geo_group": False, "debug_geo": False},
     "pc": {"mode": "smart", "concurrency": 16, "timeout": 6, "enable_ffprobe": True,
-           "request_delay": 0.1, "keep_unicast": 6, "keep_multicast": 4, "auto_geo_group": False},
+           "request_delay": 0.1, "keep_unicast": 6, "keep_multicast": 4, "auto_geo_group": False, "debug_geo": False},
 }
 
 
@@ -360,6 +362,7 @@ def get_runtime_config(user_settings):
     conf.setdefault("prefer_direct", True)
     conf.setdefault("keep_proxy_only", True)
     conf.setdefault("auto_geo_group", False)
+    conf.setdefault("debug_geo", False)
 
     mode_desc = {
         "skip": "跳过测速（GitHub Actions / 快速模式）",
@@ -369,7 +372,7 @@ def get_runtime_config(user_settings):
     print("运行模式: %s → %s" % (conf["mode"], mode_desc.get(conf["mode"], conf["mode"])))
     print("拉取订阅: %s" % ("经代理 %s" % fetch_proxy if fetch_proxy else "直连（不使用代理）"))
     print("测速补测代理: %s" % (probe_proxy if probe_proxy else "无"))
-    print("自动地理分组: %s" % ("开启" if conf.get("auto_geo_group") else "关闭"))
+    print("自动地理分组: %s | geo调试: %s" % ("开启" if conf.get("auto_geo_group") else "关闭", "开启" if conf.get("debug_geo") else "关闭"))
     return conf
 
 
@@ -442,10 +445,15 @@ def apply_rules(channels, rules):
                 matched = True
                 break
         if not matched:
+            origin_g = ch.get("origin_group", "").strip()
+            if origin_g:
+                final_g = origin_g
+            else:
+                final_g = "未分类"
             result.append({
                 "name": name,
                 "url": ch["url"],
-                "group": ch.get("origin_group") or "未分类",
+                "group": final_g,
                 "origin_name": name,
             })
     return result
@@ -992,8 +1000,9 @@ async def main():
     conf = get_runtime_config(user_settings)
 
     geo_enabled = bool(conf.get("auto_geo_group", False))
+    geo_debug = bool(conf.get("debug_geo", False))
     if geo_enabled:
-        init_geo_auto_group()
+        init_geo_auto_group(debug=geo_debug)
 
     print("最终并发: %s" % conf.get("concurrency"))
     print("最低速度: %s kbps" % conf.get("min_speed_kbps", 100))
