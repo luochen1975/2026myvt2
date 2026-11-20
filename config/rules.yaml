@@ -218,7 +218,7 @@ rules:
   - filter: '(?i)(?:凤凰|TVB|东森|中视|华视|民视|中天|三立|astro|八大|八度|香港|翡翠|明珠|天映|千禧|Viu|Cinema|HOY|龙华|黄金华剧|千禧|大爱|娱乐新闻|无线|^NOW|RTHK|澳门|澳视|莲花|纬来|公视|台视|年代|星卫|龙祥|AXN|靖天|靖洋|TVBS|^CH[58u]|星空卫视|金光布袋|爆谷|星影|原住|镜新闻|DRAMA|FILEM|LAWAK|CERIA|TRAVEL|EZTV|优视|Stingray|The Pet|采昌|影迷数位|amc|CMusic|Taiwan|寰宇|北美|非凡|爱奇艺|台湾戏剧|EYE戏剧|美亚|博斯运动|爱尔达|ROCK|JET综合|ELta|昆仑剧场|长江剧场|HUB|MOMO|博斯|HBO|邵氏|原视|Trace Urban|中旺|^汉天|^KTSF|美国城市|新视觉|Red Bull|面包|韩国娱乐|智林)'
     rename: ''
     group: '港澳台'
-    - filter: '(?i).*(?:凤凰卫视中文|凤凰中文).*'
+  - filter: '(?i).*(?:凤凰卫视中文|凤凰中文).*'
     rename: '凤凰中文台'
     group: '港澳台'
   - filter: '(?i).*(?:凤凰卫视资讯|凤凰资讯).*'
