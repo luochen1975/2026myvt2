@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""IPTV 源拉取 / 测速 / 去重 + 自动地理分组【修复版】
-修复：地理分组无法正确拿到省市、全部停留在未分类问题；增加 geo 调试日志
-策略：rules 分配 group != "未分类" → 保留；仅 group == "未分类" 才尝试地理识别
+"""IPTV 分组修复版
+修复：空 origin_group 拦截地理分组、geo 不生效、txt 输出分组异常全部挤在未分类
 """
 
 import asyncio
@@ -35,7 +34,7 @@ except Exception as e:
 try:
     import yaml
 except Exception as e:
-    _die("无法 import yaml（%s）。\n路由上执行：opkg install python3-yaml" % e)
+    _die("无法 import yaml（%s）。\n路由上执行：opkg update && opkg install python3-yaml" % e)
 
 
 # ====================== 地理分组配置 ======================
@@ -105,6 +104,7 @@ def build_geo_index(tree: dict):
         stack.extend((child, node) for child in children.values())
     name_list_long_first = sorted(name_to_node.keys(), key=len, reverse=True)
     geo_ready = True
+    print(f"[GEO-INFO] 区划索引构建完成，一共加载 {len(name_to_node)} 个地区名称")
 
 
 def get_prov_city_from_node(node: dict):
@@ -151,25 +151,34 @@ def init_geo_auto_group(debug=False) -> bool:
     debug_geo = debug
     data = load_geo_data()
     if not data:
-        print("[WARN] 区划数据加载失败，自动地理分组关闭")
+        print("[WARN] 区划数据加载失败，自动地理分组关闭！")
         return False
     build_geo_index(data)
-    print("[INFO] 区划索引加载完成，自动地理分组就绪")
     return True
 
 
 def apply_auto_geo_group(channels, enabled: bool):
-    if not enabled or not geo_ready:
+    if not enabled:
+        print("[GEO-INFO] 自动地理分组配置关闭，跳过")
+        return
+    if not geo_ready:
+        print("[WARN] geo 模块未就绪，跳过地理分组")
         return
     for ch in channels:
-        if ch.get("group") != "未分类":
+        g_orig = ch.get("group", "")
+        if g_orig != "未分类":
+            if debug_geo:
+                print(f"[GEO-SKIP] {ch['name']} 已有分组 {g_orig}，不覆盖")
             continue
         geo = match_geo_from_channel(ch["name"])
-        g = geo.get("group")
-        if g:
-            ch["group"] = g
+        g_new = geo.get("group")
+        if g_new:
+            ch["group"] = g_new
             if debug_geo:
-                print(f"[GEO-DEBUG] {ch['name']} → {g}")
+                print(f"[GEO-MATCH] {ch['name']} → {g_new}")
+        else:
+            if debug_geo:
+                print(f"[GEO-NONE] {ch['name']} 未识别到地区，保留未分类")
 
 
 # ====================== 不测速直接保留的规则 ======================
@@ -386,7 +395,7 @@ def parse_content(content):
         if line.startswith("#EXTINF:"):
             name = line.split(",", 1)[1].strip() if "," in line else "Unknown"
             group_match = re.search(r'group-title="([^"]*)"', line)
-            group = group_match.group(1) if group_match else ""
+            group = group_match.group(1).strip() if group_match else ""
             i += 1
             while i < len(lines):
                 cand = lines[i].strip()
@@ -446,10 +455,8 @@ def apply_rules(channels, rules):
                 break
         if not matched:
             origin_g = ch.get("origin_group", "").strip()
-            if origin_g:
-                final_g = origin_g
-            else:
-                final_g = "未分类"
+            # 重点修复：空 origin_group 强制转为未分类，交给 geo 处理
+            final_g = origin_g if origin_g else "未分类"
             result.append({
                 "name": name,
                 "url": ch["url"],
@@ -793,7 +800,8 @@ def dedup_and_select(channels, keep_unicast=6, keep_multicast=4, prefer_direct=T
 
 
 def _safe_text(text):
-    return str(text).replace(",", " ").replace("，", " ").strip()
+    s = str(text).replace(",", " ").replace("，", " ").strip()
+    return s if s else "未分类"
 
 
 def _display_name(ch, conf):
@@ -828,7 +836,7 @@ def _name_rank(name):
 
 
 def channel_sort_key(ch):
-    group = str(ch.get("group", ""))
+    group = _safe_text(ch.get("group", ""))
     return (_group_rank(group), group, _name_rank(ch.get("name", "")))
 
 
@@ -837,8 +845,9 @@ def generate_m3u(channels, conf=None):
     lines = ['#EXTM3U']
     channels = sorted(channels, key=channel_sort_key)
     for ch in channels:
+        g = _safe_text(ch["group"])
         lines.append('#EXTINF:-1 group-title="%s",%s'
-                     % (_safe_text(ch["group"]), _safe_text(_display_name(ch, conf))))
+                     % (g, _safe_text(_display_name(ch, conf))))
         lines.append(ch["url"])
     return "\n".join(lines)
 
@@ -1001,21 +1010,9 @@ async def main():
 
     geo_enabled = bool(conf.get("auto_geo_group", False))
     geo_debug = bool(conf.get("debug_geo", False))
+    geo_ok = False
     if geo_enabled:
-        init_geo_auto_group(debug=geo_debug)
-
-    print("最终并发: %s" % conf.get("concurrency"))
-    print("最低速度: %s kbps" % conf.get("min_speed_kbps", 100))
-
-    argv = sys.argv[1:]
-    group_kw = _arg_value(argv, "--group", "") or ""
-    limit = 0
-    _lim = _arg_value(argv, "--limit")
-    if _lim:
-        try:
-            limit = max(0, int(_lim))
-        except ValueError:
-            print("[WARN] --limit 后面要写整数，已忽略")
+        geo_ok = init_geo_auto_group(debug=geo_debug)
 
     print("\n=== 拉取源 ===")
     urls = load_list(SOURCES_FILE)
@@ -1030,10 +1027,28 @@ async def main():
     all_channels = filter_by_blacklist(all_channels, blacklist)
     print("黑名单后: %d" % len(all_channels))
 
-    print("\n=== 应用重命名/分组 ===")
+    print("\n=== 应用重命名/分组规则 ===")
     all_channels = apply_rules(all_channels, rules)
 
+    print("\n=== 执行地理分组 ===")
     apply_auto_geo_group(all_channels, geo_enabled)
+
+    if geo_debug:
+        print("\n=== 分组汇总（调试） ===")
+        cnt_map = defaultdict(int)
+        for c in all_channels:
+            cnt_map[c["group"]] += 1
+        for g, n in sorted(cnt_map.items(), key=lambda x: _group_rank(x[0])):
+            print(f"  {g} : {n} 条")
+
+    group_kw = _arg_value(sys.argv[1:], "--group", "") or ""
+    limit = 0
+    _lim = _arg_value(sys.argv[1:], "--limit")
+    if _lim:
+        try:
+            limit = max(0, int(_lim))
+        except ValueError:
+            print("[WARN] --limit 后面要写整数，已忽略")
 
     if group_kw:
         all_channels = [c for c in all_channels if group_kw in str(c.get("group", ""))]
