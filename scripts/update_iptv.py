@@ -952,10 +952,38 @@ def _group_rank(group):
 
 
 def _name_rank(name):
-    m = re.search(r"(?i)CCTV[\s\-]?(\d+)(\+)?", str(name))
+    """
+    央视排序：
+      CCTV-1 … CCTV-17（含 5+）
+      同一序号内：中文/默认 → 欧洲 → 美洲 → 亚洲 → 4K
+      再后面：CCTV兵器科技、文化精品、高尔夫等
+    """
+    n = str(name)
+
+    m = re.search(r"(?i)(?:CCTV|央视|中央电视台)[\s\-]*(\d+)(\+)?", n)
     if m:
-        return (0, int(m.group(1)), 1 if m.group(2) else 0) + _natural_key(name)
-    return (1, 0, 0) + _natural_key(name)
+        num = int(m.group(1))
+        is_plus = 1 if m.group(2) else 0
+
+        # 同一序号下的变体顺序
+        if re.search(r"4K|超高清", n, re.I):
+            variant = 4
+        elif "欧洲" in n:
+            variant = 1
+        elif "美洲" in n or "北美" in n:
+            variant = 2
+        elif "亚洲" in n:
+            variant = 3
+        else:
+            variant = 0  # CCTV-4、CCTV-4中文、普通 CCTV-n
+
+        return (0, num, is_plus, variant) + _natural_key(n)
+
+    # 无数字的央视频道（兵器科技、文化精品、高尔夫·网球等）排在 1–17 后面
+    if re.search(r"(?i)CCTV|央视|中央电视台|CGTN", n):
+        return (1, 0, 0, 0) + _natural_key(n)
+
+    return (2, 0, 0, 0) + _natural_key(n)
 
 
 def channel_sort_key(ch):
