@@ -215,7 +215,7 @@ rules:
   # ==============================================
   # 港澳台华语频道
   # ==============================================
-  - filter: '(?i)(?:凤凰|TVB|东森|中视|华视|民视|中天|三立|astro|八大|八度|香港|翡翠|明珠|天映|千禧|Viu|Cinema|HOY|龙华|黄金华剧|千禧|大爱|娱乐新闻|无线|^NOW|RTHK|澳门|澳视|莲花|纬来|公视|台视|年代|星卫|龙祥|AXN|靖天|靖洋|TVBS|^CH[58u]|星空卫视|金光布袋|爆谷|星影|原住|镜新闻|DRAMA|FILEM|LAWAK|CERIA|TRAVEL|EZTV|优视|Stingray|The Pet|采昌|影迷数位|amc|CMusic|Taiwan|寰宇|北美|非凡|爱奇艺|台湾戏剧|EYE戏剧|美亚|博斯运动|爱尔达|ROCK|JET综合|ELta|昆仑剧场|长江剧场|HUB|MOMO|博斯|HBO|邵氏|原视|Trace Urban|中旺|^汉天|^KTSF|美国城市|新视觉|Red Bull|面包|韩国娱乐|智林)'
+  - filter: '(?i)(?:凤凰|TVB|东森|中视|华视|民视|中天|三立|astro|八大|八度|香港|翡翠|明珠台|TVB明珠|无线明珠|天映|千禧|Viu|Cinema|HOY|龙华|黄金华剧|千禧|大爱|娱乐新闻|无线|^NOW|RTHK|澳门|澳视|莲花|纬来|公视|台视|年代|星卫|龙祥|AXN|靖天|靖洋|TVBS|^CH[58u]|星空卫视|金光布袋|爆谷|星影|原住|镜新闻|DRAMA|FILEM|LAWAK|CERIA|TRAVEL|EZTV|优视|Stingray|The Pet|采昌|影迷数位|amc|CMusic|Taiwan|寰宇|北美|非凡|爱奇艺|台湾戏剧|EYE戏剧|美亚|博斯运动|爱尔达|ROCK|JET综合|ELta|昆仑剧场|长江剧场|HUB|MOMO|博斯|HBO|邵氏|原视|Trace Urban|中旺|^汉天|^KTSF|美国城市|新视觉|Red Bull|面包|韩国娱乐|智林)'
     rename: ''
     group: '港澳台'
   - filter: '(?i).*(?:凤凰卫视中文|凤凰中文).*'
@@ -242,7 +242,7 @@ rules:
   - filter: '(?i).*(?:翡翠台|tvb翡翠).*'
     rename: '翡翠台'
     group: '港澳台'
-  - filter: '(?i).*(?:明珠台|tvb明珠).*'
+  - filter: '(?i)^(?!.*杭州).*(?:明珠台|tvb[\s_-]*明珠|无线明珠).*$'
     rename: '明珠台'
     group: '港澳台'
   - filter: '(?i).*(?:香港卫视).*'
@@ -342,6 +342,9 @@ rules:
   # 杭州台
   - filter: '(?i).*(?:杭州综合|杭州一套).*'
     rename: '杭州综合'
+    group: '地方>浙江'
+  - filter: '(?i).*杭州.*明珠.*'
+    rename: '杭州明珠'
     group: '地方>浙江'
   - filter: '(?i).*(?:杭州影视|杭州影视频道).*'
     rename: '杭州影视'
