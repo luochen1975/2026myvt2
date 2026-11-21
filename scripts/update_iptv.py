@@ -60,7 +60,7 @@ geo_ready = False
 debug_geo = False
 
 
-def download_geo_json() -> dict | None:
+def download_geo_json():
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
@@ -78,7 +78,7 @@ def download_geo_json() -> dict | None:
     return None
 
 
-def load_geo_data() -> dict | None:
+def load_geo_data():
     if os.path.exists(GEO_CACHE_PATH):
         mtime = os.path.getmtime(GEO_CACHE_PATH)
         if time.time() - mtime < GEO_CACHE_EXPIRE_SEC:
@@ -90,20 +90,57 @@ def load_geo_data() -> dict | None:
     return download_geo_json()
 
 
-def build_geo_index(tree: dict):
+def build_geo_index(tree):
+    """兼容 list / dict 两种区划 JSON（modood pca-code 顶层与 children 均为 list）。"""
     global name_to_node, name_list_long_first, node_parent, geo_ready
     name_to_node.clear()
     node_parent.clear()
-    stack = [(node, None) for node in tree.values()]
+
+    def iter_children(node):
+        if not isinstance(node, dict):
+            return
+        children = node.get("children")
+        if not children:
+            return
+        if isinstance(children, dict):
+            for child in children.values():
+                if isinstance(child, dict):
+                    yield child
+        elif isinstance(children, list):
+            for child in children:
+                if isinstance(child, dict):
+                    yield child
+
+    if isinstance(tree, list):
+        roots = [n for n in tree if isinstance(n, dict)]
+    elif isinstance(tree, dict):
+        if "name" in tree and ("children" in tree or "code" in tree):
+            roots = [tree]
+        else:
+            roots = [n for n in tree.values() if isinstance(n, dict)]
+    else:
+        print("[WARN] 区划数据格式无法识别：%s" % type(tree))
+        geo_ready = False
+        return
+
+    stack = [(node, None) for node in roots]
     while stack:
         node, parent = stack.pop()
-        name = node["name"]
-        name_to_node[name] = node
-        node_parent[node["code"]] = parent
-        children = node.get("children", {})
-        stack.extend((child, node) for child in children.values())
+        if not isinstance(node, dict):
+            continue
+        name = node.get("name")
+        code = node.get("code")
+        if not name:
+            continue
+        if name not in name_to_node:
+            name_to_node[name] = node
+        if code is not None:
+            node_parent[code] = parent
+        for child in iter_children(node):
+            stack.append((child, node))
+
     name_list_long_first = sorted(name_to_node.keys(), key=len, reverse=True)
-    geo_ready = True
+    geo_ready = bool(name_to_node)
     print(f"[GEO-INFO] 区划索引构建完成，一共加载 {len(name_to_node)} 个地区名称")
 
 
@@ -112,11 +149,12 @@ def get_prov_city_from_node(node: dict):
     city = None
     prov = None
     while cur is not None:
-        p = node_parent.get(cur["code"])
+        code = cur.get("code")
+        p = node_parent.get(code) if code is not None else None
         if p is None:
-            prov = cur["name"]
+            prov = cur.get("name")
             break
-        city = cur["name"]
+        city = cur.get("name")
         cur = p
     return prov, city
 
@@ -154,7 +192,7 @@ def init_geo_auto_group(debug=False) -> bool:
         print("[WARN] 区划数据加载失败，自动地理分组关闭！")
         return False
     build_geo_index(data)
-    return True
+    return geo_ready
 
 
 def apply_auto_geo_group(channels, enabled: bool):
