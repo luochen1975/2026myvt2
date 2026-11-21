@@ -2026,8 +2026,8 @@ rules:
 settings:
   # 可选：强制指定模式（一般不用写，让程序自动判断）
   # force_mode: "smart"     # skip / direct / smart
-  conf["auto_geo_group"] = True
-  conf["debug_geo"] = True
+  auto_geo_group: true
+  debug_geo: true
   # 代理（路由器或电脑有代理就填，没有就留空或删除这行）
   # proxy: "http://127.0.0.1:7890"
 
