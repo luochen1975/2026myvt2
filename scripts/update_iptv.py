@@ -158,8 +158,21 @@ def get_prov_city_from_node(node: dict):
         cur = p
     return prov, city
 
+def _norm_province_name(name: str) -> str:
+    """浙江省 → 浙江；北京市 → 北京"""
+    if not name:
+        return ""
+    s = str(name).strip()
+    for suffix in ("维吾尔自治区", "壮族自治区", "回族自治区", "自治区",
+                   "特别行政区", "省", "市"):
+        if s.endswith(suffix) and len(s) > len(suffix):
+            s = s[: -len(suffix)]
+            break
+    return s
+
 
 def match_geo_from_channel(channel_name: str) -> dict:
+    """只精确到省，分组形如 地方>浙江。"""
     if not geo_ready:
         return {"province": None, "city": None, "group": None}
     text = channel_name
@@ -172,14 +185,11 @@ def match_geo_from_channel(channel_name: str) -> dict:
             node = name_to_node[geo_name]
             prov, city = get_prov_city_from_node(node)
             if prov:
-                if city:
-                    grp = f"{prov}/{city}"
-                else:
-                    grp = prov
+                prov_short = _norm_province_name(prov)
                 return {
-                    "province": prov,
+                    "province": prov_short,
                     "city": city,
-                    "group": grp
+                    "group": f"地方>{prov_short}" if prov_short else None,
                 }
     return {"province": None, "city": None, "group": None}
 
@@ -849,13 +859,88 @@ def _display_name(ch, conf):
     return name
 
 
-GROUP_ORDER = ["央视", "卫视", "省内", "港澳台", "影视", "体育", "新闻", "纪录",
+GROUP_ORDER = ["央视", "卫视", "港澳台","地方" ,"精彩", "其他","影视", "体育", "新闻", "纪录",
                "少儿", "戏曲", "音乐", "生活", "教育", "广播", "军事", "未分类"]
+# 省会（其他省：省台、省会优先）
+PROVINCE_CAPITAL = {
+    "北京": "北京", "天津": "天津", "上海": "上海", "重庆": "重庆",
+    "河北": "石家庄", "山西": "太原", "辽宁": "沈阳", "吉林": "长春",
+    "黑龙江": "哈尔滨", "江苏": "南京", "浙江": "杭州", "安徽": "合肥",
+    "福建": "福州", "江西": "南昌", "山东": "济南", "河南": "郑州",
+    "湖北": "武汉", "湖南": "长沙", "广东": "广州", "海南": "海口",
+    "四川": "成都", "贵州": "贵阳", "云南": "昆明", "陕西": "西安",
+    "甘肃": "兰州", "青海": "西宁", "台湾": "台北",
+    "内蒙古": "呼和浩特", "广西": "南宁", "西藏": "拉萨",
+    "宁夏": "银川", "新疆": "乌鲁木齐",
+}
+
+# 浙江：省台 → 宁波 → 杭州 → 舟山 → 其余
+ZHEJIANG_CITY_PRIORITY = (
+    ("宁波", 1),
+    ("杭州", 2),
+    ("舟山", 3),
+)
+
+PROVINCIAL_STATION_KW = (
+    "卫视", "省级", "新闻综合", "综合频道",
+    "钱江", "经视", "民生休闲", "之江纪录", "教科影视",
+)
 
 
 def _natural_key(text):
     return tuple(int(p) if p.isdigit() else p.lower()
                  for p in re.split(r"(\d+)", str(text)))
+
+
+try:
+    from pypinyin import lazy_pinyin, Style
+
+    def pinyin_key(text: str):
+        return tuple(lazy_pinyin(str(text), style=Style.NORMAL))
+except ImportError:
+    def pinyin_key(text: str):
+        return _natural_key(text)
+
+
+def _is_provincial_station(name: str, prov: str) -> bool:
+    n = str(name)
+    if any(kw in n for kw in PROVINCIAL_STATION_KW):
+        return True
+    if prov and n.startswith(prov):
+        capital = PROVINCE_CAPITAL.get(prov, "")
+        if capital and capital in n and prov not in ("北京", "上海", "天津", "重庆"):
+            return False
+        return True
+    return False
+
+
+def _local_name_rank(group: str, name: str):
+    """地方>省 内排序。"""
+    g = str(group)
+    n = str(name)
+    if not g.startswith("地方>"):
+        return (50, pinyin_key(n))
+
+    prov = g.split(">", 1)[-1].strip()
+
+    # 浙江：省台 → 宁波 → 杭州 → 舟山 → 其它
+    if prov == "浙江":
+        if _is_provincial_station(n, "浙江") and not any(
+            c in n for c, _ in ZHEJIANG_CITY_PRIORITY
+        ):
+            return (0, pinyin_key(n))
+        for city, pri in ZHEJIANG_CITY_PRIORITY:
+            if city in n:
+                return (pri, pinyin_key(n))
+        return (10, pinyin_key(n))
+
+    # 其他省：省台 → 省会 → 其它
+    capital = PROVINCE_CAPITAL.get(prov, "")
+    if _is_provincial_station(n, prov) and not (capital and capital in n):
+        return (0, pinyin_key(n))
+    if capital and capital in n:
+        return (1, pinyin_key(n))
+    return (10, pinyin_key(n))
 
 
 def _group_rank(group):
@@ -875,7 +960,15 @@ def _name_rank(name):
 
 def channel_sort_key(ch):
     group = _safe_text(ch.get("group", ""))
-    return (_group_rank(group), group, _name_rank(ch.get("name", "")))
+    name = ch.get("name", "")
+    return (
+        _group_rank(group),
+        group,
+        _local_name_rank(group, name),
+        _name_rank(name),
+    )
+
+
 
 
 def generate_m3u(channels, conf=None):
