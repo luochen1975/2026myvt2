@@ -1075,18 +1075,28 @@ def channel_sort_key(ch):
 
 def generate_m3u(channels, conf=None):
     conf = conf or {}
-    lines = ["#EXTM3U"]
+    lines = [
+        "#EXTM3U",
+        "# 生成时间: %s" % time.strftime("%Y-%m-%d %H:%M:%S"),
+        "# 条目数: %d" % len(channels),
+        "# 频道数(去重名): %d" % len({dedup_key(c["name"]) for c in channels}),
+    ]
     channels = sorted(channels, key=channel_sort_key)
     for ch in channels:
         g = _safe_text(ch["group"])
-        lines.append('#EXTINF:-1 group-title="%s",%s' % (g, _safe_text(_display_name(ch, conf))))
+        lines.append('#EXTINF:-1 group-title="%s",%s'
+                     % (g, _safe_text(_display_name(ch, conf))))
         lines.append(ch["url"])
     return "\n".join(lines)
 
 
 def generate_txt(channels, conf=None):
     conf = conf or {}
-    lines = []
+    lines = [
+        "# 生成时间: %s" % time.strftime("%Y-%m-%d %H:%M:%S"),
+        "# 条目数: %d" % len(channels),
+        "# 频道数(去重名): %d" % len({dedup_key(c["name"]) for c in channels}),
+    ]
     channels = sorted(channels, key=channel_sort_key)
     current = None
     for ch in channels:
