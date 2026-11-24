@@ -985,24 +985,29 @@ def _is_provincial_station(name: str, prov: str) -> bool:
 
 
 def _local_name_rank(group: str, name: str):
+    """仅处理 地方> / 地方2>：省台 → 省会 → 其它拼音。其它分组不干预。"""
     g = str(group)
     n = str(name)
     if not g.startswith(("地方>", "地方2>")):
-        return (50, pinyin_key(n))
+        return (0,)  # 不抢在 CCTV 台号排序前面
 
     if g.startswith("地方2>"):
         prov = g.split(">", 1)[-1].replace("县市区", "").strip()
     else:
         prov = g.split(">", 1)[-1].strip()
 
+    # 浙江：省台 → 宁波 → 杭州 → 舟山 → 其它
     if prov == "浙江":
-        if _is_provincial_station(n, "浙江") and not any(c in n for c, _ in ZHEJIANG_CITY_PRIORITY):
+        if _is_provincial_station(n, "浙江") and not any(
+            c in n for c, _ in ZHEJIANG_CITY_PRIORITY
+        ):
             return (0, pinyin_key(n))
         for city, pri in ZHEJIANG_CITY_PRIORITY:
             if city in n:
                 return (pri, pinyin_key(n))
         return (10, pinyin_key(n))
 
+    # 其它省：省台 → 省会 → 其它拼音
     capital = PROVINCE_CAPITAL.get(prov, "")
     if _is_provincial_station(n, prov) and not (capital and capital in n):
         return (0, pinyin_key(n))
@@ -1020,11 +1025,18 @@ def _group_rank(group):
 
 
 def _name_rank(name):
+    """
+    央视：
+      CCTV-1 … 17（含 4 欧洲/美洲/亚洲、5+）
+      再：CGTN、文化精品、高尔夫等
+    """
     n = str(name)
+
     m = re.search(r"(?i)(?:CCTV|央视|中央电视台)[\s\-]*(\d+)(\+)?", n)
     if m:
         num = int(m.group(1))
         is_plus = 1 if m.group(2) else 0
+        # 同一台号内：默认/中文 → 欧洲 → 美洲 → 亚洲 → 4K
         if re.search(r"4K|超高清", n, re.I):
             variant = 4
         elif "欧洲" in n:
@@ -1035,15 +1047,20 @@ def _name_rank(name):
             variant = 3
         else:
             variant = 0
-        return (0, num, is_plus, variant) + _natural_key(n)
-    if re.search(r"(?i)CCTV|央视|中央电视台|CGTN", n):
+        return (0, num, is_plus, variant)
+
+    if re.search(r"(?i)CGTN", n):
         return (1, 0, 0, 0) + _natural_key(n)
-    return (2, 0, 0, 0) + _natural_key(n)
+    if re.search(r"(?i)(?:CCTV|央视|中央电视台|CETV|中国教育|中央新影)", n):
+        return (1, 1, 0, 0) + _natural_key(n)
+
+    return (2, 0, 0, 0) + pinyin_key(n)
 
 
 def channel_sort_key(ch):
     group = _safe_text(ch.get("group", ""))
     name = ch.get("name", "")
+    # 大类 → 组名 →（地方内部）→ 台名（央视台号 / 拼音）
     return (
         _group_rank(group),
         group,
