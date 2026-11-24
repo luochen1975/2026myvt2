@@ -252,7 +252,6 @@ SPECIAL_KEEP_PREFIXES = [
 ]
 
 SKIP_SPEED_KEYWORDS = [
-    "iptv.4666888.xyz",
     "211.72.174",
     "cdn6.cc.cd",
     "cdn3.indevs.in",
