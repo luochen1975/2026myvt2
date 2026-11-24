@@ -191,24 +191,29 @@ def _short_prov(prov_full: str) -> str:
 
 
 def classify_geo_channel(channel_name: str) -> str:
-    """省台/地市 → 地方>省；明显县级 → 地方2>省县市区；否则未分类。"""
     name = str(channel_name)
     hit_prov_full = None
     has_city_hit = False
     has_county_hit = any(k in name for k in COUNTY_MARK)
 
     for prov_full, info in GEO_PROV_CITY.items():
-        if any(alias in name for alias in info["alias"]):
+        aliases = info.get("alias") or []
+        cities = info.get("city_alias") or []
+        # 先匹配省名
+        if any(a in name for a in aliases):
             hit_prov_full = prov_full
-            if any(city in name for city in info.get("city_alias") or []):
-                has_city_hit = True
+            has_city_hit = any(c in name for c in cities)
+            break
+        # 再单独匹配地级市（武汉→湖北）
+        if any(c in name for c in cities):
+            hit_prov_full = prov_full
+            has_city_hit = True
             break
 
     if hit_prov_full is None:
         return "未分类"
 
     short = _short_prov(hit_prov_full)
-    # 仅当出现县/区/旗等，且不是「城区」类误伤时可再收紧；有地级市名仍归地方>
     if has_county_hit and not has_city_hit:
         return "地方2>%s县市区" % short
     return "地方>%s" % short
