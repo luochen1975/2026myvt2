@@ -264,9 +264,7 @@ SPECIAL_KEEP_PREFIXES = [
     "https://cdn.123.rr.kg",
     "http://cdn3.123.rr.kg",
     "https://fast.hidns.vip",
-    "http://38.64.72",
-
-    
+    "http://38.64.72", 
 ]
 
 SKIP_SPEED_KEYWORDS = [
