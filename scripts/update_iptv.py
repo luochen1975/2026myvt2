@@ -243,24 +243,44 @@ def apply_auto_geo_group(channels, enabled: bool):
 
 
 # ====================== 不测速直接保留 ======================
+"""
+SKIP_SPEED_KEYWORDS
+    作用：命中这些关键词的条目跳过测速，不参与速度阈值判定
+    生效阶段：测速前
+
+SPECIAL_KEEP_PREFIXES
+    作用：URL 以这些前缀开头时强制保留，即使测速不达标也不过滤
+    生效阶段：过滤时
+"""
 SPECIAL_KEEP_PREFIXES = [
     "http://[2409:8087:",
     "http://hwltc.tv.cdn.zj.chinamobile.com",
     "https://hwltc.tv.cdn.zj.chinamobile.com",
-    "rtp://",
-    "udp://",
+    "https://cdn6.cc.cd",
+    "https://cdn.qd.je",
+    "https://8.fast.hidns.vip",
+    "https://cdn3.indevs.in",
+    "http://cdn6.123.rr.kg",
+    "https://cdn.123.rr.kg",
+    "http://cdn3.123.rr.kg",
+    "https://fast.hidns.vip",
+    "http://38.64.72",
+
+    
 ]
 
 SKIP_SPEED_KEYWORDS = [
-    "211.72.174",
+    "rtp://",
+    "udp://",
+    "cdn.qd.je",
+    "cdn3.123.rr.kg",
     "cdn6.cc.cd",
     "cdn3.indevs.in",
-    "cdn3.123.rr.kg",
+    "211.72.174",
     "8.fast.hidns.vip",
     "my5353.com",
     "111.0.115.",
     "lotus.stingray.com",
-    "cdn.qd.je",
     "38.64.72",
     "d2jc41c1shgcol.cloudfront.net",
     "b27a6dd8a86c3e4ba93fbae22aaaac64",
