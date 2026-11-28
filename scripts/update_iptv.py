@@ -523,7 +523,7 @@ def filter_by_blacklist(channels, blacklist):
         if not any(bl.lower() in text for bl in blacklist):
             result.append(ch)
     return result
-
+print([c["url"] for c in channels if "163189/aod" in c["url"]])
 
 def apply_rules(channels, rules):
     result = []
@@ -919,7 +919,7 @@ def dedup_and_select(channels, keep_unicast=6, keep_multicast=4, keep_skip_speed
         final.extend(unicast[:keep_unicast])
         final.extend(multicast[:keep_multicast])
     return final
-
+print([c["url"] for c in channels if "163189/aod" in c["url"]])
 
 def _safe_text(text):
     s = str(text).replace(",", " ").replace("，", " ").strip()
