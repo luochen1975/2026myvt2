@@ -511,19 +511,22 @@ def parse_content(content):
                     "origin_group": "",
                 })
         i += 1
+    print("[DBG] parse hit:", [c["url"] for c in channels if "163189/aod" in c["url"]])
     return channels
 
 
 def filter_by_blacklist(channels, blacklist):
     if not blacklist:
+        print("[DBG] blacklist empty, keep all:", [c["url"] for c in channels if "163189/aod" in c["url"]])
         return channels
     result = []
     for ch in channels:
         text = (ch["name"] + " " + ch["url"]).lower()
         if not any(bl.lower() in text for bl in blacklist):
             result.append(ch)
+    print("[DBG] after blacklist:", [c["url"] for c in result if "163189/aod" in c["url"]])
     return result
-print([c["url"] for c in channels if "163189/aod" in c["url"]])
+
 
 def apply_rules(channels, rules):
     result = []
